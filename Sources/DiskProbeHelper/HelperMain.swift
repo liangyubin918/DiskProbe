@@ -280,29 +280,38 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
     ///   - 签名团队与 helper 自身一致（防别的签名替换 app 再驱动 root helper）
     private func verifyClient(_ connection: NSXPCConnection) -> Bool {
         // NSXPCConnection.auditToken 是 ObjC 私有属性，KVC 取出。
-        // 不走 App Store 的本地工具，这是获取可靠调用方身份的标准做法；
-        // pid 校验有 TOCTOU（连接建立后原进程死掉被复用 pid），不能用。
-        guard let token = connection.value(forKey: "auditToken") as? audit_token_t else {
+        // 注意：KVC 装箱的 C 结构体必须用 NSValue.getValue 拷贝字节——
+        // `as? audit_token_t` 在运行时恒为 nil，会把所有客户端（含合法 app）拒掉。
+        guard let boxed = connection.value(forKey: "auditToken") as? NSValue else {
+            NSLog("[DiskProbeHelper] 校验失败：KVC 未取到 auditToken")
             return false
         }
+        var token = audit_token_t()
+        boxed.getValue(&token)
         var tokenCopy = token
         let tokenData = withUnsafeBytes(of: &tokenCopy) { Data($0) }
 
         var clientCode: SecCode?
         guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributeAudit: tokenData] as CFDictionary,
                                              [], &clientCode) == errSecSuccess,
-              let client = clientCode else { return false }
+              let client = clientCode else {
+            NSLog("[DiskProbeHelper] 校验失败：SecCodeCopyGuestWithAttributes 失败")
+            return false
+        }
 
-        guard let clientID = signingIdentifier(client), clientID == HelperIdentifiers.appIdentifier else {
+        let clientID = signingIdentifier(client)
+        guard clientID == HelperIdentifiers.appIdentifier else {
+            NSLog("[DiskProbeHelper] 校验失败：identifier 不匹配（实际 \(clientID ?? "nil")）")
             return false
         }
         // 双方都必须由同一团队签名（ad-hoc 没有 OU，直接拒绝）
-        guard let clientTeam = signingTeam(client),
-              let selfCode = selfCode(),
-              let selfTeam = signingTeam(selfCode),
-              clientTeam == selfTeam else {
+        let clientTeam = signingTeam(client)
+        let selfTeam = selfCode().flatMap(signingTeam)
+        guard let clientTeam, let selfTeam, clientTeam == selfTeam else {
+            NSLog("[DiskProbeHelper] 校验失败：团队不匹配（client=\(clientTeam ?? "nil") self=\(selfTeam ?? "nil")）")
             return false
         }
+        NSLog("[DiskProbeHelper] 接受连接：identifier=\(clientID) team=\(clientTeam)")
         return true
     }
 
