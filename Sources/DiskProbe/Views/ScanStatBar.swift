@@ -23,6 +23,14 @@ struct ScanStatBar: View {
             Spacer()
 
             healthVerdict
+
+            if !forcedZero, appState.scanState == .finished {
+                Button { appState.saveScanRecord() } label: {
+                    Label("保存检测记录", systemImage: "square.and.arrow.down")
+                }
+                .controlSize(.small)
+                .help("导出 CSV（表格分析）或 JSON（完整报告）")
+            }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
     }

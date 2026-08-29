@@ -75,6 +75,9 @@ struct ScanControlBar: View {
             // 状态标签 + 特权助手状态 + 扫描错误提示
             HStack(spacing: 8) {
                 helperStatusView
+                if let ok = appState.saveSuccessMessage {
+                    Text(ok).font(.caption).foregroundStyle(.green)
+                }
                 if let err = appState.authError {
                     if err.hasPrefix("[TCC]") {
                         Button("去授权完全磁盘访问") {

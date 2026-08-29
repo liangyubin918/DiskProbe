@@ -195,3 +195,53 @@ import Testing
         #expect(merged.status == .normal)
     }
 }
+
+// MARK: 检测记录导出
+
+@Suite struct ScanRecordExporterTests {
+    let meta = ScanMeta(diskName: "WD Elements, 25A3", bsdName: "disk8",
+                        diskSizeBytes: 4_000_787_030_016, blockSizeBytes: 131_072,
+                        totalBlocks: 30_518, warnMs: 100, abnormalMs: 500,
+                        startedAt: Date(timeIntervalSince1970: 1_785_000_000),
+                        finishedAt: Date(timeIntervalSince1970: 1_785_000_900))
+    let summary: ScanSummary = {
+        var s = ScanSummary()
+        s.normal = 30_500; s.warning = 10; s.abnormal = 6; s.error = 2; s.unscanned = 0
+        return s
+    }()
+    let anomalies = [
+        ScanRecord(blockIndex: 12, offsetBytes: 1_572_864, elapsedMs: 612.3,
+                   status: .abnormal, errno: nil),
+        ScanRecord(blockIndex: 15, offsetBytes: 1_966_080, elapsedMs: 1450.0,
+                   status: .error, errno: 5),
+    ]
+
+    @Test func csvContainsMetaAndAnomalies() {
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: anomalies)
+        #expect(csv.hasPrefix("\u{FEFF}"))                       // Excel 需要 BOM
+        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
+        #expect(csv.contains("12,1572864,612.3,异常,"))
+        #expect(csv.contains("15,1966080,1450.0,错误,5"))
+        #expect(csv.contains("正常 30500 / 警告 10 / 异常 6 / 错误 2"))
+    }
+
+    @Test func csvEscapesCommasInDiskName() {
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: [])
+        #expect(csv.contains("\"WD Elements, 25A3 (/dev/disk8)\""))
+    }
+
+    @Test func jsonRoundTrips() throws {
+        let data = try ScanRecordExporter.json(meta: meta, summary: summary,
+                                               cells: [.unscanned, MapCell(status: .error, elapsedMs: 900, blockIndex: 15)],
+                                               anomalies: anomalies)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(obj?["format"] as? String == "DiskProbe 扫描记录 v1")
+        #expect((obj?["anomalies"] as? [[String: Any]])?.count == 2)
+        #expect((obj?["mapCells"] as? [[String: Any]])?.count == 2)
+    }
+
+    @Test func emptyAnomaliesStillHasHeader() {
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: [])
+        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
+    }
+}

@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
+import AppKit
 import ServiceManagement
+import UniformTypeIdentifiers
 import DiskProbeCore
 
 // MARK: - 特权助手端到端健康状态
@@ -314,12 +316,56 @@ final class AppState: ObservableObject {
         return disks.first(where: { $0.id == id })?.displayName
     }
 
+    // MARK: 保存检测记录
+
+    @Published var saveSuccessMessage: String? = nil
+
+    /// 扫描完成后导出检测记录（CSV 便于表格分析 / JSON 完整报告），
+    /// 由存储面板的下拉框选择格式，按扩展名写盘
+    func saveScanRecord() {
+        guard let disk = selectedDisk, scanResultsBelong(to: disk), scanState == .finished else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText, .json]
+        panel.nameFieldStringValue = Self.defaultRecordName(disk: disk)
+        panel.canCreateDirectories = true
+        panel.message = "CSV 适合表格分析；JSON 为完整报告（含地图快照）。在格式下拉框中选择类型。"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { await self?.writeRecord(to: url) }
+        }
+    }
+
+    private func writeRecord(to url: URL) async {
+        let snapshot = await engine.exportSnapshot()
+        do {
+            if url.pathExtension.lowercased() == "json" {
+                let data = try ScanRecordExporter.json(meta: snapshot.meta, summary: snapshot.summary,
+                                                       cells: snapshot.cells, anomalies: snapshot.anomalies)
+                try data.write(to: url, options: .atomic)
+            } else {
+                let csv = ScanRecordExporter.csv(meta: snapshot.meta, summary: snapshot.summary,
+                                                 anomalies: snapshot.anomalies)
+                try csv.write(to: url, atomically: true, encoding: .utf8)
+            }
+            saveSuccessMessage = "检测记录已保存：\(url.lastPathComponent)"
+        } catch {
+            authError = "保存检测记录失败：\(error.localizedDescription)"
+        }
+    }
+
+    static func defaultRecordName(disk: DiskInfo) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmm"
+        return "DiskProbe-\(disk.bsdName)-\(f.string(from: Date()))"
+    }
+
     func startScan(blockSizeKB: Int = 128) {
         guard let d = selectedDisk else { return }
         resultsDiskID = d.id
         progress = nil
         authError = nil
         helperOpError = nil
+        saveSuccessMessage = nil
         resetStats()
 
         // 初始化地图
@@ -369,6 +415,7 @@ final class AppState: ObservableObject {
     private func resetScanDisplay() {
         resultsDiskID = nil
         progress = nil
+        saveSuccessMessage = nil
         mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
         resetStats()
     }

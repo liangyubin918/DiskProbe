@@ -78,7 +78,7 @@ public struct ScanBlock: Identifiable, Sendable {
 
 /// 地图单个格子的聚合信息：颜色取格内最严重块的状态，
 /// 悬停提示展示格子编号与定格该状态的采样耗时。
-public struct MapCell: Sendable, Equatable {
+public struct MapCell: Sendable, Equatable, Codable {
     public var status: BlockStatus
     public var elapsedMs: Double
     public var blockIndex: Int    // -1 = 未扫描
@@ -90,4 +90,63 @@ public struct MapCell: Sendable, Equatable {
         self.elapsedMs = elapsedMs
         self.blockIndex = blockIndex
     }
+}
+
+// MARK: - 扫描记录导出
+
+/// 一次扫描的元信息（导出报告的头部）
+public struct ScanMeta: Codable, Sendable {
+    public var diskName: String
+    public var bsdName: String
+    public var diskSizeBytes: Int64
+    public var blockSizeBytes: Int64
+    public var totalBlocks: Int
+    public var warnMs: Double
+    public var abnormalMs: Double
+    public var startedAt: Date
+    public var finishedAt: Date?
+
+    public init(diskName: String, bsdName: String, diskSizeBytes: Int64, blockSizeBytes: Int64,
+                totalBlocks: Int, warnMs: Double, abnormalMs: Double, startedAt: Date, finishedAt: Date?) {
+        self.diskName = diskName; self.bsdName = bsdName; self.diskSizeBytes = diskSizeBytes
+        self.blockSizeBytes = blockSizeBytes; self.totalBlocks = totalBlocks
+        self.warnMs = warnMs; self.abnormalMs = abnormalMs
+        self.startedAt = startedAt; self.finishedAt = finishedAt
+    }
+}
+
+/// 非"正常"块的明细记录（警告/异常/错误）。正常块不逐条落盘，
+/// 否则 1TB 盘会产生数百万行无用数据；完整地图快照在 JSON 报告里。
+public struct ScanRecord: Codable, Sendable {
+    public var blockIndex: Int
+    public var offsetBytes: Int64
+    public var elapsedMs: Double
+    public var status: BlockStatus
+    public var errno: Int32?     // nil = 读取成功但偏慢
+
+    public init(blockIndex: Int, offsetBytes: Int64, elapsedMs: Double, status: BlockStatus, errno: Int32?) {
+        self.blockIndex = blockIndex; self.offsetBytes = offsetBytes
+        self.elapsedMs = elapsedMs; self.status = status; self.errno = errno
+    }
+}
+
+// MARK: - 扫描汇总
+
+public struct ScanSummary: Codable, Sendable {
+    public var normal = 0
+    public var warning = 0
+    public var abnormal = 0
+    public var error = 0
+    public var unscanned = 0
+
+    public init(normal: Int = 0, warning: Int = 0, abnormal: Int = 0, error: Int = 0, unscanned: Int = 0) {
+        self.normal = normal
+        self.warning = warning
+        self.abnormal = abnormal
+        self.error = error
+        self.unscanned = unscanned
+    }
+
+    public var total: Int { normal + warning + abnormal + error + unscanned }
+    public var hasIssues: Bool { warning + abnormal + error > 0 }
 }

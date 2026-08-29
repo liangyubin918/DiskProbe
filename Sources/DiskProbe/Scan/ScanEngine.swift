@@ -23,6 +23,11 @@ actor ScanEngine {
     private var progressAsyncStream: AsyncStream<ScanProgress>?
     private var realSession: RealScanSession?
 
+    // 检测记录（供"保存检测记录"导出）：仅累积非正常块，正常块不逐条落盘
+    private(set) var scanMeta: ScanMeta?
+    private(set) var finalSummary: ScanSummary?
+    private(set) var anomalies: [ScanRecord] = []
+
     private(set) var totalBlocks = 0
     private(set) var diskSize: Int64 = 0
     private(set) var blockSize: Int64 = 128 * 1024
@@ -94,6 +99,14 @@ actor ScanEngine {
         self.stopRequested = false
         self.pauseRequested = false
         self.speedSamples = []
+        self.anomalies = []
+        self.finalSummary = nil
+        self.scanMeta = ScanMeta(
+            diskName: disk.displayName, bsdName: disk.bsdName,
+            diskSizeBytes: disk.sizeBytes, blockSizeBytes: blockSize,
+            totalBlocks: self.totalBlocks, warnMs: thresholds.warnMs,
+            abnormalMs: thresholds.abnormalMs, startedAt: Date(), finishedAt: nil
+        )
 
         // 只保留最新事件：进度是全量快照，丢弃旧事件不影响正确性，
         // 也避免消费端卡顿时 unbounded 缓冲无限增长
@@ -214,6 +227,11 @@ actor ScanEngine {
                 let cellIndex = min(cellCount - 1, i / cellsPerGroup)
                 map[cellIndex] = Self.mergedCell(map[cellIndex], status: block.status,
                                                  elapsedMs: block.elapsedMs, blockIndex: i)
+                if block.status != .normal {
+                    anomalies.append(ScanRecord(blockIndex: i, offsetBytes: offset,
+                                                elapsedMs: elapsedMs, status: block.status,
+                                                errno: failed ? batch.errnos[k] : nil))
+                }
                 lastBlock = block
             }
 
@@ -242,8 +260,22 @@ actor ScanEngine {
             lastAuthError = "扫描异常终止：\(error)"
             finish(runID: runID, state: .error)
         } else {
+            scanMeta?.finishedAt = Date()
+            finalSummary = summary
             finish(runID: runID, state: .finished)
         }
+    }
+
+    /// 导出检测记录的完整快照（在扫描结束后调用）
+    struct ExportSnapshot: Sendable {
+        var meta: ScanMeta?
+        var summary: ScanSummary?
+        var cells: [MapCell]
+        var anomalies: [ScanRecord]
+    }
+
+    func exportSnapshot() -> ExportSnapshot {
+        ExportSnapshot(meta: scanMeta, summary: finalSummary, cells: map, anomalies: anomalies)
     }
 
     private func isCurrent(_ runID: UUID) -> Bool {
@@ -301,15 +333,4 @@ struct ScanProgress: Sendable {
     var fraction: Double {
         totalBlocks == 0 ? 0 : min(1, Double(scannedCount) / Double(totalBlocks))
     }
-}
-
-struct ScanSummary: Sendable {
-    var normal = 0
-    var warning = 0
-    var abnormal = 0
-    var error = 0
-    var unscanned = 0
-
-    var total: Int { normal + warning + abnormal + error + unscanned }
-    var hasIssues: Bool { warning + abnormal + error > 0 }
 }
