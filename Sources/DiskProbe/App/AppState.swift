@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import ServiceManagement
 import DiskProbeCore
 
 // MARK: - 全局 AppState（@MainActor，UI 持有）
@@ -37,7 +38,13 @@ final class AppState: ObservableObject {
 
     @Published var progress: ScanProgress? = nil
     @Published var scanState: ScanState = .idle
-    @Published var useRealScan: Bool = false // 真实读取待安全的特权 XPC helper 实现后再开放
+    @Published var useRealScan: Bool = false // false=演示扫描；true=真实只读扫描（需特权助手）
+
+    // 特权助手（SMAppService daemon）
+    @Published var helperStatus: SMAppService.Status = .notRegistered
+    private var helperService: SMAppService {
+        .daemon(plistName: HelperIdentifiers.launchdPlistName)
+    }
 
     // 认证状态
     @Published var isAuthenticating = false
@@ -67,6 +74,25 @@ final class AppState: ObservableObject {
 
     init() {
         Task { await refreshDisks() }
+        helperStatus = helperService.status
+    }
+
+    // MARK: 特权助手
+
+    func refreshHelperStatus() {
+        helperStatus = helperService.status
+    }
+
+    /// 安装特权助手（系统会弹管理员密码确认）。必须从 .app bundle 运行。
+    func installHelper() {
+        Task {
+            do {
+                try helperService.register()
+                helperStatus = helperService.status
+            } catch {
+                authError = "安装特权助手失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: 磁盘列表
@@ -128,14 +154,10 @@ final class AppState: ObservableObject {
         // 取消旧监听，保证进度流始终只有一个消费者
         listenerTask?.cancel()
         listenerTask = Task {
-            if useRealScan {
-                isAuthenticating = true
-                let ok = await engine.authenticate(disk: d, blockSize: Int64(blockSizeKB) * 1024)
-                isAuthenticating = false
-                if !ok {
-                    authError = await engine.takeLastAuthError() ?? "未能以管理员权限启动读取程序。可能取消了密码输入。"
-                    return
-                }
+            if useRealScan && helperStatus != .enabled {
+                authError = "真实扫描需要先安装特权助手（含 root 授权）。"
+                await syncState()
+                return
             }
             let started = await engine.start(
                 disk: d,

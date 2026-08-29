@@ -21,6 +21,7 @@ actor ScanEngine {
 
     private var progressStream: AsyncStream<ScanProgress>.Continuation?
     private var progressAsyncStream: AsyncStream<ScanProgress>?
+    private var realSession: RealScanSession?
 
     private(set) var totalBlocks = 0
     private(set) var diskSize: Int64 = 0
@@ -46,23 +47,16 @@ actor ScanEngine {
         return (totalBlocks + cellCount - 1) / cellCount
     }
 
-    func authenticate(disk: DiskInfo, blockSize: Int64 = 128 * 1024) async -> Bool {
-        guard disk.sizeBytes > 0, blockSize > 0 else {
-            lastAuthError = "磁盘容量或块大小无效。"
-            return false
-        }
-        lastAuthError = "真实裸设备读取已暂时禁用：旧版特权 helper 存在本地提权与路径竞态风险。请在签名校验的 XPC privileged helper 完成后再启用该功能。"
-        return false
-    }
-
     func takeLastAuthError() -> String? {
         defer { lastAuthError = nil }
         return lastAuthError
     }
 
-    /// 开始演示扫描。返回 false 表示未能启动，原因见 takeLastAuthError()。
+    /// 开始扫描。useReal=false 为演示模式（模拟数据）；
+    /// useReal=true 通过特权 XPC helper 做真实只读扫描。
+    /// 返回 false 表示未能启动，原因见 takeLastAuthError()。
     @discardableResult
-    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000, useReal: Bool = false) -> Bool {
+    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000, useReal: Bool = false) async -> Bool {
         guard state == .idle || state == .finished || state == .stopped || state == .error else {
             lastAuthError = "扫描正在进行中，请先停止当前扫描。"
             return false
@@ -72,10 +66,17 @@ actor ScanEngine {
             lastAuthError = "磁盘容量或块大小无效。"
             return false
         }
-        guard !useReal else {
-            state = .error
-            lastAuthError = "真实裸设备读取未启用。"
-            return false
+
+        var batchStream: AsyncStream<ScanBatch>? = nil
+        if useReal {
+            let session = RealScanSession()
+            guard let stream = await session.begin(bsdName: disk.bsdName, blockSize: UInt64(blockSize)) else {
+                state = .error
+                lastAuthError = session.lastError ?? "无法连接特权助手。请先安装特权助手，并从 .app 启动（swift run 模式不支持）。"
+                return false
+            }
+            realSession = session
+            batchStream = stream
         }
 
         let quotient = disk.sizeBytes / blockSize
@@ -87,7 +88,7 @@ actor ScanEngine {
         self.cellCount = max(1, cellCount)
         self.cellsPerGroup = Self.cellsPerBlockGroup(totalBlocks: self.totalBlocks, cellCount: self.cellCount)
         self.map = Array(repeating: .unscanned, count: self.cellCount)
-        self.useRealReader = false
+        self.useRealReader = useReal
         self.stopRequested = false
         self.pauseRequested = false
         self.speedSamples = []
@@ -101,8 +102,14 @@ actor ScanEngine {
 
         let runID = UUID()
         currentRunID = runID
-        task = Task { [weak self] in
-            await self?.runMockScan(disk: disk, runID: runID, scanStart: Date())
+        if useReal, let batchStream {
+            task = Task { [weak self] in
+                await self?.runRealScan(runID: runID, scanStart: Date(), batches: batchStream)
+            }
+        } else {
+            task = Task { [weak self] in
+                await self?.runMockScan(disk: disk, runID: runID, scanStart: Date())
+            }
         }
         return true
     }
@@ -123,6 +130,7 @@ actor ScanEngine {
         guard currentRunID != nil else { return }
         stopRequested = true
         pauseRequested = false
+        realSession?.stop()
         task?.cancel()
         task = nil
         currentRunID = nil
@@ -225,6 +233,100 @@ actor ScanEngine {
         finish(runID: runID, state: .finished)
     }
 
+    /// 真实扫描：消费 helper 回传的批次流，复用与演示扫描相同的
+    /// 分类/统计/地图/速度逻辑。
+    private func runRealScan(runID: UUID, scanStart: Date, batches: AsyncStream<ScanBatch>) async {
+        var scanned = 0
+        var summary = ScanSummary(unscanned: totalBlocks)
+        var pausedTotal: TimeInterval = 0
+        var pauseBegan: Date? = nil
+        var pauseSentToHelper = false
+
+        for await batch in batches {
+            guard isCurrent(runID) else { return }
+            if Task.isCancelled || stopRequested {
+                finish(runID: runID, state: .stopped)
+                return
+            }
+            if pauseRequested, !pauseSentToHelper {
+                realSession?.pause()
+                pauseSentToHelper = true
+            }
+            while pauseRequested {
+                if pauseBegan == nil { pauseBegan = Date() }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard isCurrent(runID) else { return }
+                if Task.isCancelled || stopRequested {
+                    finish(runID: runID, state: .stopped)
+                    return
+                }
+            }
+            if pauseBegan != nil {
+                pausedTotal += Date().timeIntervalSince(pauseBegan!)
+                pauseBegan = nil
+            }
+            if pauseSentToHelper, !pauseRequested {
+                realSession?.resume()
+                pauseSentToHelper = false
+            }
+
+            for k in 0..<batch.count {
+                let i = batch.firstIndex + k
+                guard i < totalBlocks else { continue }
+                let elapsedMs = batch.elapsedMs[k]
+                let failed = batch.errnos[k] != 0
+                let (offset, overflow) = Int64(i).multipliedReportingOverflow(by: blockSize)
+                guard !overflow, offset < diskSize else { continue }
+                let size = min(blockSize, diskSize - offset)
+
+                let block = ScanBlock(
+                    id: i,
+                    startOffset: offset,
+                    size: size,
+                    elapsedMs: elapsedMs,
+                    status: thresholds.classify(elapsedMs: elapsedMs, failed: failed),
+                    errnoValue: failed ? batch.errnos[k] : nil
+                )
+                scanned += 1
+                switch block.status {
+                case .normal:   summary.normal += 1
+                case .warning:  summary.warning += 1
+                case .abnormal: summary.abnormal += 1
+                case .error:    summary.error += 1
+                case .unscanned: break
+                }
+                summary.unscanned -= 1
+                let cellIndex = min(cellCount - 1, i / cellsPerGroup)
+                if block.status.severityOrder > map[cellIndex].severityOrder {
+                    map[cellIndex] = block.status
+                }
+                let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
+                let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
+                let remaining = max(0, totalBlocks - scanned)
+                let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
+                progressStream?.yield(ScanProgress(
+                    currentIndex: i,
+                    totalBlocks: totalBlocks,
+                    scannedCount: scanned,
+                    elapsedSeconds: elapsed,
+                    speedMBps: speed,
+                    etaSeconds: eta,
+                    lastBlock: block,
+                    summary: summary,
+                    mapCells: map
+                ))
+            }
+        }
+
+        guard isCurrent(runID) else { return }
+        if let error = realSession?.lastError {
+            lastAuthError = "扫描异常终止：\(error)"
+            finish(runID: runID, state: .error)
+        } else {
+            finish(runID: runID, state: .finished)
+        }
+    }
+
     private func isCurrent(_ runID: UUID) -> Bool {
         currentRunID == runID
     }
@@ -234,6 +336,8 @@ actor ScanEngine {
         self.state = state
         currentRunID = nil
         task = nil
+        realSession?.close()
+        realSession = nil
         progressStream?.finish()
         progressStream = nil
     }

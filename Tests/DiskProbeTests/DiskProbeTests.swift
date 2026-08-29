@@ -1,6 +1,8 @@
+import Foundation
 import Testing
 @testable import DiskProbeCore
 @testable import DiskProbe
+@testable import DiskProbeHelper
 
 // MARK: ScanThresholds.classify 边界
 
@@ -107,5 +109,58 @@ import Testing
 
     @Test func zeroTotalDoesNotDivideByZero() {
         #expect(makeProgress(totalBlocks: 0, scanned: 0).fraction == 0)
+    }
+}
+
+// MARK: BatchCodec（XPC 批次二进制编解码）
+
+@Suite struct BatchCodecTests {
+    @Test func roundTripPreservesAllFields() {
+        let offsets: [Int64] = [0, 131_072, 1_048_576]
+        let elapsedMs: [Double] = [3.5, 120.25, 950.75]
+        let errnos: [Int32] = [0, 0, 5]
+        let data = BatchCodec.encode(firstIndex: 42, offsets: offsets,
+                                     elapsedMs: elapsedMs, errnos: errnos)
+        let batch = BatchCodec.decode(data)
+        #expect(batch != nil)
+        #expect(batch?.firstIndex == 42)
+        #expect(batch?.offsets == offsets)
+        #expect(batch?.elapsedMs == elapsedMs)
+        #expect(batch?.errnos == errnos)
+    }
+
+    @Test func rejectsGarbage() {
+        #expect(BatchCodec.decode(Data()) == nil)
+        #expect(BatchCodec.decode(Data(repeating: 0xFF, count: 64)) == nil)
+        #expect(BatchCodec.decode(Data(repeating: 0x00, count: 10)) == nil) // 头部不足
+    }
+
+    @Test func emptyBatchRoundTrips() {
+        let data = BatchCodec.encode(firstIndex: 0, offsets: [], elapsedMs: [], errnos: [])
+        let batch = BatchCodec.decode(data)
+        #expect(batch?.count == 0)
+    }
+}
+
+// MARK: 特权 helper 的设备路径白名单
+
+@Suite struct DevicePathValidationTests {
+    @Test func acceptsWholeRawDiskOnly() {
+        #expect(ScanRunner.pathAllowed("/dev/rdisk8"))
+        #expect(ScanRunner.pathAllowed("/dev/rdisk0"))
+    }
+
+    @Test func rejectsEverythingElse() {
+        #expect(!ScanRunner.pathAllowed("/dev/disk8"))      // 非裸设备
+        #expect(!ScanRunner.pathAllowed("/dev/rdisk8s2"))   // 分区
+        #expect(!ScanRunner.pathAllowed("/etc/passwd"))     // 普通文件
+        #expect(!ScanRunner.pathAllowed("/tmp/evil"))       // 随意路径
+        #expect(!ScanRunner.pathAllowed(""))
+    }
+
+    @Test func deviceProblemRejectsNonDeviceFiles() {
+        // 存在但不是字符设备的路径必须被拒
+        #expect(ScanRunner.deviceProblem("/etc/passwd") != nil)
+        #expect(ScanRunner.deviceProblem("/dev/disk8") != nil)
     }
 }

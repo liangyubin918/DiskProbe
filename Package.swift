@@ -30,9 +30,16 @@ let package = Package(
             path: "Sources/DiskProbe"
         ),
 
+        // 特权 helper（SMAppService daemon，root 权限运行，只做只读扫描）
+        .executableTarget(
+            name: "DiskProbeHelper",
+            dependencies: ["DiskProbeCore"],
+            path: "Sources/DiskProbeHelper"
+        ),
+
         .testTarget(
             name: "DiskProbeTests",
-            dependencies: ["DiskProbe", "DiskProbeCore"],
+            dependencies: ["DiskProbe", "DiskProbeCore", "DiskProbeHelper"],
             path: "Tests/DiskProbeTests"
         ),
     ]

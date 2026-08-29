@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import DiskProbeCore
 
 // MARK: - 扫描控制条：开始/暂停/继续/停止 + 块大小
@@ -51,6 +52,20 @@ struct ScanControlBar: View {
 
             Divider().frame(height: 22)
 
+            // 扫描模式：演示（模拟数据）/ 真实（特权 helper 只读扫描）
+            Picker("扫描模式", selection: Binding(
+                get: { appState.useRealScan },
+                set: { appState.useRealScan = $0; appState.refreshHelperStatus() }
+            )) {
+                Text("演示").tag(false)
+                Text("真实").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 110)
+            .disabled(state == .scanning || state == .paused)
+
+            Divider().frame(height: 22)
+
             // 块大小
             LabeledContent {
                 Picker("块大小", selection: $blockSizeKB) {
@@ -71,11 +86,10 @@ struct ScanControlBar: View {
 
             Spacer()
 
-            // 状态标签 + 认证提示
+            // 状态标签 + 特权助手提示 + 认证提示
             HStack(spacing: 8) {
-                if appState.isAuthenticating {
-                    ProgressView().controlSize(.small)
-                    Text("等待密码…").font(.caption).foregroundStyle(.orange)
+                if appState.useRealScan {
+                    helperStatusView
                 }
                 if let err = appState.authError {
                     Text(err).font(.caption).foregroundStyle(.red)
@@ -84,6 +98,24 @@ struct ScanControlBar: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var helperStatusView: some View {
+        switch appState.helperStatus {
+        case .enabled:
+            Label("特权助手已就绪", systemImage: "checkmark.shield.fill")
+                .font(.caption).foregroundStyle(.green)
+        case .requiresApproval:
+            Button("去系统设置批准特权助手") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .font(.caption).controlSize(.small)
+        default:
+            Button("安装特权助手") { appState.installHelper() }
+                .font(.caption).controlSize(.small)
+        }
     }
 
     @ViewBuilder private var stateLabel: some View {
