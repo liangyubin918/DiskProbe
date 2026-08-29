@@ -43,8 +43,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>DiskProbe</string>
     <key>CFBundleIdentifier</key><string>local.diskprobe</string>
-    <key>CFBundleVersion</key><string>2.3</string>
-    <key>CFBundleShortVersionString</key><string>2.3</string>
+    <key>CFBundleVersion</key><string>2.4</string>
+    <key>CFBundleShortVersionString</key><string>2.4</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -77,6 +77,11 @@ cat > "$APP_BUNDLE/Contents/Library/LaunchDaemons/local.diskprobe.helper.plist" 
 </dict>
 </plist>
 PLIST
+
+# 赞赏收款码（可选）：Resources/Donate-WeChat.png、Donate-Alipay.png
+for f in Donate-WeChat.png Donate-Alipay.png; do
+    [ -f "Resources/$f" ] && cp "Resources/$f" "$APP_BUNDLE/Contents/Resources/"
+done
 
 # 应用图标（可选）：用系统图标占位，无则跳过
 if [ -f "Resources/AppIcon.icns" ]; then

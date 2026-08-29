@@ -5,6 +5,7 @@ import DiskProbeCore
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @State private var showDonate = false
 
     var body: some View {
         Form {
@@ -36,6 +37,19 @@ struct SettingsView: View {
                 Text("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("支持作者") {
+                Button {
+                    showDonate = true
+                } label: {
+                    Label("赞赏作者", systemImage: "heart.fill")
+                        .foregroundStyle(.pink)
+                }
+                Text("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .sheet(isPresented: $showDonate) {
+            DonateSheet()
         }
         .formStyle(.grouped)
         .padding(20)

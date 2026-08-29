@@ -73,7 +73,7 @@ DiskProbeHelper（root 权限 launchd daemon，SMAppService 安装）
 - app 断开连接时 helper 自动停止扫描；空闲 60 秒自动退出
 - 旧版 `AuthorizationExecuteWithPrivileges` 提权方案存在本地提权漏洞，已彻底废弃
 
-踩坑记录（SMAppService daemon 的 `NSXPCListener.service()` 崩溃、KVC auditToken 强转陷阱、TCC 授权等）见 [REMIND.md](REMIND.md)，完整架构与开发背景见 [HANDOFF.md](HANDOFF.md)。
+开发与构建细节见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## License
 
