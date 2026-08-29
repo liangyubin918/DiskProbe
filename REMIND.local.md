@@ -1,6 +1,32 @@
-# REMIND — 下次继续工作时先读这个
+# REMIND — 工作笔记（本地，不进 git）
 
-> 更新：2026-08-29。背景细节见 HANDOFF.md；历史审查结论的代码位置都标了 文件:行号。
+> 最后更新：2026-08-29（GitHub 发布后）。新会话先读这个 + DEVELOPMENT.md + git log。
+
+## 当前状态（2026-08-29）
+
+- 项目已开源：https://github.com/liangyubin918/DiskProbe（公开，MIT，账号 liangyubin918）
+- Release v2.5 已发布（含 arm64 zip 二进制；仓库简介里贴了去隔离命令）
+- 版本号三处同步：make_app.sh Info.plist、HelperIdentifiers.helperVersion、Release tag（本次就栽过）
+- git 推送凭据已配好（gh auth setup-git），直接 git push
+- 本地 /Applications/DiskProbe.app = 线上 v2.5（从 Release zip 下载安装验证过）
+
+## 待办 / 后续想法
+
+- [ ] README 顶部截图占位（shell 无屏幕录制权限，需用户自己截：docs/screenshot.png）
+- [ ] 联系邮箱已配：yubinliang918@gmail.com（README 联系区 + .github/SECURITY.md）
+- [ ] 支付宝码用户暂不放；Resources/Donate-Alipay.png 放入即自动双卡展示
+- [ ] 免费 Apple Development 证书 1 年有效（约 2027-08 过期），届时重新构建发版
+- [ ] 想法：两次扫描记录对比 diff、断点续扫、Intel 构建
+
+## 用户偏好
+
+- 用户非开发者背景，解释通俗；重要决策先说明再动手
+- 只要真实扫描（演示模式已删，勿恢复）
+- 面板跟随选中盘，扫描后台继续；停止=清空结果
+- 地图平移：纵向抓取方向、横向标准滚动方向（用户特意调整过）
+
+---
+（以下为历史记录）
 
 ## 🔑 2026-08-29 特权助手终极坑（已解决，勿重蹈）
 
