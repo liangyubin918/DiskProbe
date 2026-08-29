@@ -23,7 +23,8 @@ DiskProbe 是一款 macOS 原生硬盘坏道检测工具（对标 DiskGenius 的
 ## 系统要求
 
 - macOS 14 及以上，Apple Silicon 原生
-- 钥匙串中有效的 **Apple Development 签名证书**（特权助手必须真实签名，SMAppService 拒绝 ad-hoc）
+- 签名证书：**不需要付费开发者账户**。安装 Xcode 并登录任意免费 Apple ID，钥匙串即自动获得 Apple Development 证书（免费证书 1 年有效，过期重新构建即可；iOS 上"7 天过期"的限制不适用于 macOS）
+- 特权助手必须真实签名（SMAppService 拒绝 ad-hoc），make_app.sh 会自动检测证书
 - `smartctl`（`brew install smartmontools`，仅 SMART 功能需要，没有也能扫描）
 - **完全磁盘访问权限**：macOS 隐私保护要求读取裸设备必须授权，root 也不豁免；首次扫描按提示在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加本 app 即可
 
