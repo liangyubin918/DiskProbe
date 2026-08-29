@@ -29,14 +29,19 @@ struct ScanPanelView: View {
             )
             Divider()
 
-            // 扫描地图占大部分空间
-            ScanMapView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+            // 扫描地图占大部分空间：只显示属于当前选中盘的结果；
+            // 后台扫描其他盘时这里显示空状态
+            if appState.scanResultsBelong(to: disk) {
+                ScanMapView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            } else {
+                emptyScanArea
+            }
 
             Divider()
-            ScanStatBar()
+            ScanStatBar(forcedZero: !appState.scanResultsBelong(to: disk))
         }
         .confirmationDialog(
             "确认开始扫描",
@@ -48,6 +53,23 @@ struct ScanPanelView: View {
         } message: {
             Text(confirmMessage)
         }
+    }
+
+    /// 切到未扫描的盘时的空状态；后台扫描仍在进行时给出提示
+    private var emptyScanArea: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.grid.3x3")
+                .font(.system(size: 44))
+                .foregroundStyle(.quaternary)
+            Text("该磁盘暂无扫描结果")
+                .font(.callout).foregroundStyle(.secondary)
+            if let name = appState.activeScanDiskName {
+                Text("后台正在扫描「\(name)」，切回该盘可查看实时进度")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 12)
     }
 
     private var confirmMessage: String {

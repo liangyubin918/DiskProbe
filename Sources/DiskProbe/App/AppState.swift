@@ -19,18 +19,9 @@ enum HelperHealth: Equatable {
 @MainActor
 final class AppState: ObservableObject {
     @Published var disks: [DiskInfo] = []
-    @Published var selectedDisk: DiskInfo? = nil {
-        didSet {
-            // 切到另一块盘：清空上一块盘残留的进度/地图/统计；
-            // 若上一块盘的扫描还在跑，先自动停止（扫描面板始终只反映当前选中盘）
-            guard selectedDisk?.id != displayedScanDiskID else { return }
-            if scanState == .scanning || scanState == .paused {
-                stopScan()
-            } else {
-                resetScanDisplay()
-            }
-        }
-    }
+    // 注意：切盘不清数据——扫描结果绑定在 resultsDiskID 上，后台扫描继续进行；
+    // 面板按 scanResultsBelong(to:) 决定显示实时结果还是空状态
+    @Published var selectedDisk: DiskInfo? = nil
     @Published var isEnumerating = false
     @Published var enumerateError: String? = nil
 
@@ -307,12 +298,25 @@ final class AppState: ObservableObject {
 
     // MARK: 扫描控制
 
-    /// 当前显示的扫描结果属于哪块盘（nil = 无结果）。切到其他盘时用于清空残留显示。
-    private var displayedScanDiskID: String? = nil
+    /// 当前扫描结果（进度/地图/统计）属于哪块盘（nil = 无结果）。
+    /// 切盘不清数据：后台扫描继续，面板按归属决定显示结果还是空状态。
+    private(set) var resultsDiskID: String? = nil
+
+    /// 选中盘是否拥有当前扫描结果（决定面板显示实时结果还是空状态）
+    func scanResultsBelong(to disk: DiskInfo) -> Bool {
+        disk.id == resultsDiskID
+    }
+
+    /// 后台正在扫描的盘名（用于切盘后的空状态提示）
+    var activeScanDiskName: String? {
+        guard scanState == .scanning || scanState == .paused,
+              let id = resultsDiskID else { return nil }
+        return disks.first(where: { $0.id == id })?.displayName
+    }
 
     func startScan(blockSizeKB: Int = 128) {
         guard let d = selectedDisk else { return }
-        displayedScanDiskID = d.id
+        resultsDiskID = d.id
         progress = nil
         authError = nil
         helperOpError = nil
@@ -363,7 +367,7 @@ final class AppState: ObservableObject {
 
     /// 清空扫描显示，并解除"结果属于某块盘"的绑定
     private func resetScanDisplay() {
-        displayedScanDiskID = nil
+        resultsDiskID = nil
         progress = nil
         mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
         resetStats()
