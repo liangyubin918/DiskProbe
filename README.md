@@ -1,16 +1,19 @@
 # DiskProbe — macOS 硬盘坏道检测工具
 
 macOS 原生硬盘检测工具（类似 DiskGenius 坏道检测），Swift + SwiftUI，Apple Silicon 原生。
+当前版本（2.0）已实现**真实只读坏道扫描**：SMAppService 特权 XPC helper + 演示双模式。
 
 ## 使用（推荐：.app 双击启动）
 
 ```bash
 cd ~/.zcode/workspace/default/DiskProbe
-./make_app.sh            # 一键打包 → dist/DiskProbe.app
+./make_app.sh            # 一键打包 → dist/DiskProbe.app（优先 Apple Development 签名）
 open dist/DiskProbe.app  # 双击启动
 ```
 
-- 当前版本默认提供演示扫描；真实裸设备读取已因旧版特权模型存在安全风险而暂时禁用。
+- **真实扫描**三步走：app 内把扫描模式切到「真实」→ 点「安装特权助手」并输入管理员密码 → 选盘开始扫描。
+  必须从 .app bundle 启动（SMAppService 要求），`swift run` 模式下真实扫描会明确报错。
+- 打包脚本找不到 Apple Development 身份时降级 ad-hoc 签名，此时**仅演示扫描**可用（SMAppService 拒绝 ad-hoc daemon）。
 - 如果 macOS 提示"无法打开"，先执行：
   ```bash
   xattr -dr com.apple.quarantine dist/DiskProbe.app
@@ -19,9 +22,9 @@ open dist/DiskProbe.app  # 双击启动
 ## 开发调试
 
 ```bash
-swift build                    # 编译
-swift run DiskProbe            # 或直接运行 .build/debug/DiskProbe
-# 单元测试需要完整 Xcode 工具链（Command Line Tools 不带测试框架）：
+swift build                    # 编译 app + DiskProbeHelper
+swift run DiskProbe            # 运行 GUI app（仅演示扫描可用）
+# 单元测试需要完整 Xcode 工具链（Command Line Tools 不带 XCTest/Testing 框架）：
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
@@ -30,27 +33,32 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 | 功能 | 说明 |
 |---|---|
 | 磁盘列表 | 只显示**物理盘**（过滤 APFS 容器/磁盘镜像/虚拟盘），外置盘排前，标注系统盘/外置盘 |
-| 扫描 | **演示扫描**（模拟数据）与**真实扫描**（特权 helper 只读裸设备）双模式；真实模式需先在 app 内安装特权助手 |
-| 扫描地图 | 100×60 色块网格，实时进度/速度/ETA |
-| 扫描控制 | 开始/暂停/继续/停止，阈值可调（Cmd+,） |
+| 扫描 | **演示扫描**（模拟数据）与**真实扫描**（特权 helper 只读裸设备，F_NOCACHE 绕过页缓存）双模式 |
+| 扫描地图 | 100×60 色块网格，引擎产出完整快照，实时进度/速度/ETA |
+| 扫描控制 | 开始/暂停/继续/停止，阈值可调（Cmd+,，UserDefaults 持久化） |
 | SMART | smartctl 读取：温度/通电时间/健康/重映射扇区(HDD)/寿命(SSD)，不支持时明确提示 |
 
-## 安全设计
+## 安全设计（特权 helper）
 
-- 旧版使用的 `AuthorizationExecuteWithPrivileges` 与 bundle 内 helper 已移除，避免本地提权和路径 TOCTOU。
-- 真实裸设备读取仅会在签名校验、系统安装的 XPC privileged helper 完成后重新引入。
-- 扫描前确认对话框，系统盘额外警告
+- helper 以 root 权限 launchd daemon 运行（SMAppService 安装），**只读**：接口层没有任何写语义。
+- 调用方校验：audit token → SecCode → 校验 identifier 为 `local.diskprobe` 且与 helper 同一签名团队；ad-hoc 直接拒绝。
+- 设备白名单 `^/dev/rdisk[0-9]+$`（整盘裸设备），lstat 拒绝符号链接，stat 必须是字符设备。
+- `O_RDONLY` 打开 + F_NOCACHE；app 断开连接时 helper 自动停止扫描。
+- 旧版 `AuthorizationExecuteWithPrivileges` + bundle 内 helper 的提权方案**已废弃，不要再引入**。
 
 ## 目录结构
 
 ```
-Sources/DiskProbeCore/   共享模型（DiskInfo / BlockStatus / 阈值）
-Sources/DiskProbe/       SwiftUI app（枚举 / 扫描引擎 / SMART / 视图）
-make_app.sh              打包脚本（.app + ad-hoc 签名）
-HANDOFF.md               开发进度记录
+Sources/DiskProbeCore/    共享模型（DiskInfo / BlockStatus / 阈值 / XPC 协议 / BatchCodec）
+Sources/DiskProbe/        SwiftUI app（枚举 / 扫描引擎 / RealScanSession / SMART / 视图）
+Sources/DiskProbeHelper/  特权 helper（root daemon：ScanRunner + 客户端身份校验）
+Tests/DiskProbeTests/     Swift Testing 单元测试（19 个）
+make_app.sh               打包脚本（.app + helper 双签名 + LaunchDaemons plist）
+HANDOFF.md                架构与开发进度记录
+REMIND.md                 下次继续工作的注意事项（先读这个）
 ```
 
 ## 依赖
 
-- 需要 `smartctl`（brew install smartmontools）用于 SMART 信息；没有也能用扫描功能
-- SMART 读取依赖 smartctl；当前版本不请求管理员权限
+- `smartctl`（brew install smartmontools）用于 SMART 信息；没有也能扫描
+- 真实扫描需要钥匙串里有效的 Apple Development 签名身份，并从 .app 启动

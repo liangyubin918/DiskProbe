@@ -2,10 +2,10 @@
 // DiskProbe - macOS 硬盘坏道检测工具
 //
 // 构建方式：
-//   swift build                   # 编译 app
-//   swift run DiskProbe           # 运行 GUI app
+//   swift build                   # 编译 app + 特权 helper
+//   swift run DiskProbe           # 运行 GUI app（仅演示扫描；真实扫描需从 .app 启动）
+//   ./make_app.sh                 # 打包 dist/DiskProbe.app（含真实扫描）
 //
-// 当前不构建或打包特权 helper；真实裸设备读取将在安全的 XPC 方案完成后恢复。
 // 在 Xcode 中：File > Open > Package.swift → Cmd+R
 import PackageDescription
 
@@ -21,9 +21,7 @@ let package = Package(
             path: "Sources/DiskProbeCore"
         ),
 
-        // 主 App（SwiftUI，普通用户权限）。
-        // 真实裸设备读取将在签名校验的 XPC privileged helper 完成后单独加入；
-        // 不再构建或打包可由用户替换后再提升权限的 helper。
+        // 主 App（SwiftUI，普通用户权限）。真实扫描通过 XPC 调用 DiskProbeHelper。
         .executableTarget(
             name: "DiskProbe",
             dependencies: ["DiskProbeCore"],

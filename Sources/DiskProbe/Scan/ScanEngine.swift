@@ -3,11 +3,14 @@ import DiskProbeCore
 
 // MARK: - 扫描引擎
 //
-// 真实裸设备读取必须由经 SMAppService/SMJobBless 安装、签名校验的 XPC
-// privileged helper 提供。旧版将普通用户可写 bundle 内的二进制通过
-// AuthorizationExecuteWithPrivileges 提升为 root，存在本地提权风险，已移除。
-// 当前发行版只保留不接触设备的演示扫描；请求真实读取会明确失败，绝不降级为
-// 不受保护的提权执行。
+// 扫描分两种模式：
+//   - 演示模式（useReal=false）：模拟数据，不接触设备。
+//   - 真实模式（useReal=true）：由 SMAppService 安装、签名校验的 XPC
+//     privileged helper（DiskProbeHelper，root 权限 launchd daemon）执行
+//     只读裸设备扫描，本 actor 消费其批次流做分类/统计/地图。
+// 旧版 AuthorizationExecuteWithPrivileges 提权方案存在本地提权风险，已废弃。
+//
+// 注意：真实模式必须从 .app bundle 启动（SMAppService 要求），swift run 不可用。
 
 actor ScanEngine {
     private(set) var state: ScanState = .idle
