@@ -30,7 +30,7 @@ DiskProbe 是一款 macOS 原生硬盘坏道检测工具（对标 DiskGenius 的
 ## 构建与运行
 
 ```bash
-git clone https://github.com/<you>/DiskProbe.git
+git clone https://github.com/liangyubin918/DiskProbe.git
 cd DiskProbe
 ./make_app.sh                 # 编译 app + 特权 helper，打包并签名 → dist/DiskProbe.app
 open dist/DiskProbe.app       # 双击启动
