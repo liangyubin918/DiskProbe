@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import DiskProbeCore
 
 // MARK: - 扫描地图（核心可视化：色块网格，支持悬停查看 / 缩放 / 平移）
@@ -8,8 +9,8 @@ import DiskProbeCore
 ///
 /// 交互：
 ///   - 悬停：显示格子编号、块编号与采样耗时
-///   - 双指捏合 / +- 按钮：缩放（1×–16×）
-///   - 拖动：平移；双击：复位
+///   - 触控板二指滑动 / 滚轮：平移（本地事件监听，不遮挡任何 SwiftUI 手势）
+///   - 双指捏合 / +- 按钮：缩放（1×–16×）；鼠标拖动平移；双击：复位
 struct ScanMapView: View {
     @EnvironmentObject var appState: AppState
 
@@ -19,6 +20,15 @@ struct ScanMapView: View {
     @State private var magBase: CGFloat = 1
     @State private var dragBase: CGSize = .zero
     @State private var hover: (index: Int, point: CGPoint)? = nil
+    @State private var canvasSize: CGSize = .zero
+
+    // 二指滚动平移：透明 NSView 仅用于标定地图区域的窗口坐标；
+    // scrollWheel 事件由本地监听器截获，事件不经过它，因此不遮挡 SwiftUI 手势
+    private final class ScrollRegionRef {
+        weak var view: NSView?
+    }
+    @State private var scrollRegion = ScrollRegionRef()
+    @State private var scrollMonitor: Any? = nil
 
     static let maxZoom: CGFloat = 16
 
@@ -28,6 +38,10 @@ struct ScanMapView: View {
 
             GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
+                    // 地图区域标定（窗口坐标），供二指滑动平移使用
+                    ScrollRegionCatcher { scrollRegion.view = $0 }
+                        .frame(width: geo.size.width, height: geo.size.height)
+
                     Canvas { ctx, size in
                         drawCells(ctx: ctx, size: size)
                     }
@@ -73,8 +87,11 @@ struct ScanMapView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
                     .padding(8)
-                    .help("双指捏合或加减缩放，拖动平移，双击复位")
+                    .help("双指滑动平移，捏合或加减缩放，双击复位")
                 }
+                .onAppear { canvasSize = geo.size; installScrollPan() }
+                .onChange(of: geo.size) { canvasSize = geo.size }
+                .onDisappear { removeScrollPan() }
             }
             .frame(minHeight: 220)
 
@@ -134,6 +151,43 @@ struct ScanMapView: View {
         magBase = 1
         offset = .zero
         dragBase = .zero
+    }
+
+    // MARK: 二指滑动 / 滚轮平移
+
+    private struct ScrollRegionCatcher: NSViewRepresentable {
+        let onView: (NSView) -> Void
+        func makeNSView(context: Context) -> NSView {
+            let v = NSView()
+            onView(v)
+            return v
+        }
+        func updateNSView(_ nsView: NSView, context: Context) { onView(nsView) }
+    }
+
+    /// 本地监听 scrollWheel：光标在地图区域内且已放大时截获用于平移，
+    /// 其余事件原样放行。透明 NSView 只提供命中范围，不参与事件分发，
+    /// 因此悬停 / 捏合 / 拖动 / 双击等 SwiftUI 手势完全不受影响。
+    private func installScrollPan() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard zoom > 1, let view = scrollRegion.view, view.window != nil else { return event }
+            let local = view.convert(event.locationInWindow, from: nil)
+            guard view.bounds.contains(local) else { return event }
+            // 触控板二指滑动映射为"抓取内容"：手指向哪，地图向哪
+            offset = CGSize(width: offset.width - event.scrollingDeltaX,
+                            height: offset.height + event.scrollingDeltaY)
+            clampOffset(size: canvasSize)
+            dragBase = offset
+            return nil
+        }
+    }
+
+    private func removeScrollPan() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
     }
 
     // MARK: 悬停
@@ -236,7 +290,7 @@ struct ScanMapView: View {
                 }
             }
             Spacer()
-            Text("悬停查看格子详情，双指捏合缩放，拖动平移，双击复位")
+            Text("悬停查看格子详情，双指滑动平移，捏合缩放，双击复位")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
     }
