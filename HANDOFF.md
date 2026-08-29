@@ -87,4 +87,5 @@ DiskProbeCore（共享）：DiskInfo / BlockStatus / ScanThresholds /
 
 ## 当前已知问题
 
-见 REMIND.md「待修复 bug 清单」（对抗式审查 2026-08-29 结论，尚未修复）。
+无未修复 bug。2026-08-29 对抗式审查发现的 10 项问题（含 1 项高危：helper 未安装时
+begin() 永久挂起）已全部修复，清单与修法见 REMIND.md；后续可做项也在 REMIND.md。

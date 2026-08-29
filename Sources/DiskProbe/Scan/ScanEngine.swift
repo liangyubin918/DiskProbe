@@ -134,6 +134,9 @@ actor ScanEngine {
         stopRequested = true
         pauseRequested = false
         realSession?.stop()
+        // 停止后立刻断开并释放会话，不让 XPC 连接悬到下次扫描
+        realSession?.close()
+        realSession = nil
         task?.cancel()
         task = nil
         currentRunID = nil
@@ -209,7 +212,8 @@ actor ScanEngine {
             case .error:    summary.error += 1
             case .unscanned: break
             }
-            summary.unscanned -= 1
+            // unscanned 由总数减去已扫数推导，避免与 helper 实际可读范围有 ±1 块的漂移
+            summary.unscanned = max(0, totalBlocks - scanned)
             let cellIndex = min(cellCount - 1, i / cellsPerGroup)
             if block.status.severityOrder > map[cellIndex].severityOrder {
                 map[cellIndex] = block.status
@@ -273,6 +277,9 @@ actor ScanEngine {
                 pauseSentToHelper = false
             }
 
+            // 整批处理完只 yield 一次：进度是全量快照，逐块 yield 会把
+            // 6000 格快照重复拷贝上百次
+            var lastBlock: ScanBlock? = nil
             for k in 0..<batch.count {
                 let i = batch.firstIndex + k
                 guard i < totalBlocks else { continue }
@@ -298,23 +305,27 @@ actor ScanEngine {
                 case .error:    summary.error += 1
                 case .unscanned: break
                 }
-                summary.unscanned -= 1
                 let cellIndex = min(cellCount - 1, i / cellsPerGroup)
                 if block.status.severityOrder > map[cellIndex].severityOrder {
                     map[cellIndex] = block.status
                 }
+                lastBlock = block
+            }
+
+            if let last = lastBlock {
+                summary.unscanned = max(0, totalBlocks - scanned)
                 let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
                 let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
                 let remaining = max(0, totalBlocks - scanned)
                 let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
                 progressStream?.yield(ScanProgress(
-                    currentIndex: i,
+                    currentIndex: last.id,
                     totalBlocks: totalBlocks,
                     scannedCount: scanned,
                     elapsedSeconds: elapsed,
                     speedMBps: speed,
                     etaSeconds: eta,
-                    lastBlock: block,
+                    lastBlock: last,
                     summary: summary,
                     mapCells: map
                 ))

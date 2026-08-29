@@ -12,17 +12,34 @@ import Darwin
 //   1. 每个新连接校验调用方：audit token → SecCode → 同一签名团队 + app identifier。
 //   2. 设备路径白名单 ^/dev/rdisk[0-9]+$，lstat 拒绝符号链接，stat 必须是字符设备。
 //   3. 只读：设备以 O_RDONLY 打开；接口层没有任何写语义的方法。
+//   4. 所有连接断开后空闲 60 秒自动退出，把进程还给 launchd。
 
 final class ScanRunner: NSObject, HelperScanProtocol {
+    // fd / 停止 / 暂停 / 连接被 XPC 连接队列和扫描队列并发访问，必须加锁
+    private let lock = NSLock()
     private var fd: Int32 = -1
     private var stopFlag = false
     private var pauseFlag = false
-    private var scanQueue: DispatchQueue?
-    private weak var connection: NSXPCConnection?
     private var didReportDone = false
+    private weak var connection: NSXPCConnection?
+
+    /// 由 delegate 在接受连接时挂接（connection 通过 exportedObject 强持有 runner，
+    /// runner 用 weak 反向引用避免环）
+    func attach(_ connection: NSXPCConnection) {
+        lock.lock(); self.connection = connection; lock.unlock()
+    }
+
+    func detach() {
+        lock.lock(); connection = nil; lock.unlock()
+    }
+
+    // MARK: XPC 接口（连接队列调用）
 
     func startScan(devicePath: String, blockSize: UInt64, reply: @escaping (String?) -> Void) {
-        guard fd == -1 else { reply("扫描已在进行中"); return }
+        lock.lock()
+        let busy = fd != -1
+        lock.unlock()
+        guard !busy else { reply("扫描已在进行中"); return }
         guard blockSize >= 512, blockSize <= 4 * 1024 * 1024 else {
             reply("块大小超出允许范围（512B–4MB）")
             return
@@ -44,37 +61,48 @@ final class ScanRunner: NSObject, HelperScanProtocol {
             return
         }
 
+        lock.lock()
         fd = newFD
         stopFlag = false
         pauseFlag = false
         didReportDone = false
+        lock.unlock()
         let size = Int(blockSize)
-        let queue = DispatchQueue(label: "local.diskprobe.scan", qos: .userInitiated)
-        scanQueue = queue
         reply(nil)
-        queue.async { [weak self] in
-            self?.runLoop(blockSize: size)
+        DispatchQueue(label: "local.diskprobe.scan", qos: .userInitiated).async { [weak self] in
+            self?.runLoop(fd: newFD, blockSize: size)
         }
     }
 
-    func pauseScan() { pauseFlag = true }
-    func resumeScan() { pauseFlag = false }
-
-    func stopScan() {
-        stopFlag = true
-        pauseFlag = false
-    }
+    func pauseScan() { setFlags(pause: true) }
+    func resumeScan() { setFlags(pause: false) }
+    func stopScan() { setFlags(stop: true, pause: false) }
 
     func connectionDidInvalidate() {
         // app 侧断开（崩溃/退出）时立刻停止读盘，不让 daemon 悬空
-        stopFlag = true
-        pauseFlag = false
+        setFlags(stop: true, pause: false)
     }
 
-    // MARK: 扫描主循环
+    // MARK: 标志位（加锁访问）
 
-    private func runLoop(blockSize: Int) {
-        guard fd >= 0, let connection, let proxy = connection.remoteObjectProxy as? HelperClientProtocol else {
+    private func flags() -> (stop: Bool, pause: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (stopFlag, pauseFlag)
+    }
+
+    private func setFlags(stop: Bool? = nil, pause: Bool? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        if let stop { stopFlag = stop }
+        if let pause { pauseFlag = pause }
+    }
+
+    // MARK: 扫描主循环（独立队列）
+
+    private func runLoop(fd scanFD: Int32, blockSize: Int) {
+        lock.lock()
+        let connection = self.connection
+        lock.unlock()
+        guard scanFD >= 0, let connection, let proxy = connection.remoteObjectProxy as? HelperClientProtocol else {
             finish(proxy: nil, error: "内部错误：连接或回调接口不可用")
             return
         }
@@ -102,18 +130,20 @@ final class ScanRunner: NSObject, HelperScanProtocol {
             lastSend = now
         }
 
-        while !stopFlag {
-            while pauseFlag && !stopFlag {
+        while true {
+            var (stop, pause) = flags()
+            while pause && !stop {
                 Thread.sleep(forTimeInterval: 0.1)
+                (stop, pause) = flags()
             }
-            guard !stopFlag else { break }
+            guard !stop else { break }
 
             var done: Int = 0
             var readErrno: Int32 = 0
             var eof = false
             let started = DispatchTime.now().uptimeNanoseconds
             while done < blockSize {
-                let n = pread(fd, buffer.advanced(by: done), blockSize - done, offset + Int64(done))
+                let n = pread(scanFD, buffer.advanced(by: done), blockSize - done, offset + Int64(done))
                 if n < 0 {
                     if errno == EINTR { continue }
                     readErrno = Int32(errno)
@@ -151,9 +181,12 @@ final class ScanRunner: NSObject, HelperScanProtocol {
     }
 
     private func finish(proxy: HelperClientProtocol?, error: String?) {
+        lock.lock()
         if fd >= 0 { close(fd); fd = -1 }
-        guard !didReportDone else { return }
+        let already = didReportDone
         didReportDone = true
+        lock.unlock()
+        guard !already else { return }
         proxy?.onDone(error)
     }
 
@@ -177,7 +210,7 @@ final class ScanRunner: NSObject, HelperScanProtocol {
             return "拒绝符号链接设备路径"
         }
         guard (ls.st_mode & S_IFMT) == S_IFCHR else {
-            return "不是块设备节点"
+            return "不是磁盘设备节点（期望 /dev/rdiskN 字符设备）"
         }
         return nil
     }
@@ -186,23 +219,56 @@ final class ScanRunner: NSObject, HelperScanProtocol {
 // MARK: - 连接管理 + 客户端身份校验
 
 final class HelperDelegate: NSObject, NSXPCListenerDelegate {
-    private var runner: ScanRunner?
+    private let lock = NSLock()
+    private var connectionCount = 0
+    private var idleExitWork: DispatchWorkItem?
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
         guard verifyClient(newConnection) else {
             NSLog("[DiskProbeHelper] 拒绝未授权的连接（客户端身份校验失败）")
             return false
         }
+        cancelIdleExit()
+        // runner 由 connection 通过 exportedObject 强引用持有，随连接失效而释放；
+        // 支持多个连接并存（但每次 startScan 前 ScanRunner 会拒绝并发扫描）
         let runner = ScanRunner()
-        self.runner = runner
+        runner.attach(newConnection)
+        lock.lock()
+        connectionCount += 1
+        lock.unlock()
         newConnection.exportedInterface = NSXPCInterface(with: HelperScanProtocol.self)
         newConnection.exportedObject = runner
         newConnection.remoteObjectInterface = NSXPCInterface(with: HelperClientProtocol.self)
-        newConnection.invalidationHandler = { [weak runner] in
+        newConnection.invalidationHandler = { [weak self, weak runner] in
+            runner?.detach()
             runner?.connectionDidInvalidate()
+            self?.connectionClosed()
         }
         newConnection.resume()
         return true
+    }
+
+    /// 所有连接断开后空闲 60 秒退出，把常驻内存还给系统（下次连接 launchd 会按需拉起）
+    private func connectionClosed() {
+        lock.lock()
+        connectionCount -= 1
+        let idle = connectionCount <= 0
+        lock.unlock()
+        guard idle else { return }
+        lock.lock()
+        if idleExitWork == nil {
+            let work = DispatchWorkItem { exit(0) }
+            idleExitWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+        }
+        lock.unlock()
+    }
+
+    private func cancelIdleExit() {
+        lock.lock()
+        idleExitWork?.cancel()
+        idleExitWork = nil
+        lock.unlock()
     }
 
     /// 用 audit token 找到调用方的 SecCode，校验：
@@ -256,21 +322,34 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
         return staticCode
     }
 
-    /// 从 designated requirement 字符串里提取 certificate leaf[subject.OU] 的团队 ID
+    /// 取调用方的签名团队 ID。优先用签名信息里的结构化字段（macOS 10.12+），
+    /// 回退到 designated requirement 字符串解析（同时兼容带引号/不带引号两种格式）。
     private func signingTeam(_ code: SecCode) -> String? {
         guard let staticCode = staticCode(code) else { return nil }
+
+        var info: CFDictionary?
+        if SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+           let dict = info as? [String: Any],
+           let team = dict[kSecCodeInfoTeamIdentifier as String] as? String,
+           !team.isEmpty {
+            return team
+        }
+
         var req: SecRequirement?
         var reqStr: CFString?
         guard SecCodeCopyDesignatedRequirement(staticCode, [], &req) == errSecSuccess,
               let req = req,
               SecRequirementCopyString(req, [], &reqStr) == errSecSuccess,
               let dr = reqStr as String? else { return nil }
-        guard let match = dr.range(of: #"subject\.OU\]\s*=\s*"([A-Z0-9]{10})"#, options: .regularExpression) else {
+        guard let match = dr.range(of: #"subject\.OU\]\s*=\s*"?([A-Z0-9]{10})"?"#,
+                                   options: .regularExpression) else {
             return nil
         }
-        let inner = String(dr[match])
-        guard let q1 = inner.firstIndex(of: "\""), let q2 = inner.lastIndex(of: "\""), q1 < q2 else { return nil }
-        return String(inner[inner.index(after: q1)..<q2])
+        // match 里再取连续 10 位大写字母数字，兼容有引号与无引号
+        guard let teamRange = dr.range(of: #"[A-Z0-9]{10}"#, options: .regularExpression, range: match) else {
+            return nil
+        }
+        return String(dr[teamRange])
     }
 }
 

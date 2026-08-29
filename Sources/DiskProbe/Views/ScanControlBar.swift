@@ -13,6 +13,7 @@ struct ScanControlBar: View {
     let onStop: () -> Void
 
     @EnvironmentObject var appState: AppState
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         HStack(spacing: 12) {
@@ -98,6 +99,11 @@ struct ScanControlBar: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
+        .onAppear { appState.refreshHelperStatus() }
+        // 用户从系统设置批准特权助手回到 app 后，自动刷新安装状态
+        .onChange(of: scenePhase) {
+            if scenePhase == .active { appState.refreshHelperStatus() }
+        }
     }
 
     @ViewBuilder private var helperStatusView: some View {

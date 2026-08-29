@@ -86,10 +86,15 @@ final class AppState: ObservableObject {
     /// 安装特权助手（系统会弹管理员密码确认）。必须从 .app bundle 运行。
     func installHelper() {
         Task {
-            do {
-                try helperService.register()
-                helperStatus = helperService.status
-            } catch {
+            // register() 是同步阻塞调用（等用户输密码可能数秒），
+            // 必须放后台线程，否则管理员确认期间整个 UI 冻结
+            let service = helperService
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                do { try service.register(); return .success(()) }
+                catch { return .failure(error) }
+            }.value
+            helperStatus = helperService.status
+            if case .failure(let error) = result {
                 authError = "安装特权助手失败：\(error.localizedDescription)"
             }
         }
