@@ -148,24 +148,42 @@ final class AppState: ObservableObject {
         Task {
             // register()/unregister() 是同步阻塞调用（等用户输密码可能数秒），
             // 必须放后台线程，否则管理员确认期间整个 UI 冻结
-            let outcome: (ok: Bool, unregisterError: String?, registerError: String?) =
+            let outcome: (ok: Bool, unregisterError: String?, registerError: String?, registerAttempts: Int) =
                 await Task.detached(priority: .userInitiated) {
                     var unregisterError: String? = nil
                     if reinstall {
-                        do { try service.unregister() }
-                        catch { unregisterError = error.localizedDescription }
+                        do { try await service.unregister() }
+                        catch { unregisterError = Self.describe(error) }
                     }
-                    do {
-                        try service.register()
-                        return (true, unregisterError, nil)
-                    } catch {
-                        return (false, unregisterError, error.localizedDescription)
+                    var registerError: String? = nil
+                    var attempts = 0
+                    // BTM 数据库在注销/注册之间偶有传播延迟，失败后短暂等待重试一次
+                    for wait in [0, 1_500_000_000] {
+                        if attempts > 0 {
+                            try? await Task.sleep(nanoseconds: UInt64(wait))
+                        }
+                        attempts += 1
+                        do {
+                            try service.register()
+                            registerError = nil
+                            break
+                        } catch {
+                            registerError = Self.describe(error)
+                        }
                     }
+                    return (registerError == nil, unregisterError, registerError, attempts)
                 }.value
 
             helperStatus = helperService.status
             refreshHelperHealth()
             helperOpInProgress = false
+
+            appendDiag("""
+            === \(reinstall ? "重装" : "安装")特权助手 ===
+            unregisterError: \(outcome.unregisterError ?? "无")
+            registerError(尝试 \(outcome.registerAttempts) 次): \(outcome.registerError ?? "无")
+            最终 status: \(helperStatus)  health: \(helperHealth)
+            """)
 
             // 结果呈现：成功清掉旧错误；失败区分"未完成"与"已成功但有小问题"
             if outcome.ok {
@@ -184,6 +202,34 @@ final class AppState: ObservableObject {
                     helperOpError = "\(reinstall ? "重装" : "安装")特权助手失败：\(detail)"
                 }
             }
+        }
+    }
+
+    // MARK: 诊断日志
+
+    /// 安装/重装过程的完整错误写入 Application Support，便于远程排查
+    /// （SMAppService 的 localizedDescription 常丢失 domain/code）。
+    private static let diagLogURL: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DiskProbe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("install-log.txt")
+    }()
+
+    private nonisolated static func describe(_ error: Error) -> String {
+        let ns = error as NSError
+        return "[\(ns.domain) code=\(ns.code)] \(ns.localizedDescription) userInfo=\(ns.userInfo)"
+    }
+
+    private func appendDiag(_ text: String) {
+        let stamped = "---- \(Date()) ----\n\(text)\n"
+        NSLog("[DiskProbe] %@", text.replacingOccurrences(of: "\n", with: " | "))
+        if let handle = try? FileHandle(forWritingTo: Self.diagLogURL) {
+            handle.seekToEndOfFile()
+            handle.write(stamped.data(using: .utf8)!)
+            try? handle.close()
+        } else {
+            try? stamped.data(using: .utf8)?.write(to: Self.diagLogURL)
         }
     }
 
