@@ -2,6 +2,19 @@
 
 > 更新：2026-08-29。背景细节见 HANDOFF.md；历史审查结论的代码位置都标了 文件:行号。
 
+## 🔑 2026-08-29 特权助手终极坑（已解决，勿重蹈）
+
+**NSXPCListener.service() 不能用于 launchd daemon！** 它走 xpc_main 的
+"XPC Service bundle" check-in 路径，与 MachServices daemon 环境不匹配，
+在 `_xpc_copy_xpcservice_dictionary` 处 SIGTRAP（进程毫秒级崩溃，进程表都难抓到）。
+正确写法：`NSXPCListener(machServiceName: HelperIdentifiers.machServiceName)`。
+当时所有表象——15 秒超时、EX_CONFIG 反复重启、"已注册但无法启动"、
+重装"失败"——都是这一个 bug 的不同投影。诊断三板斧：
+1. daemon plist 加 `StandardErrorPath`（/tmp/diskprobe-helper.err，root 所有）；
+2. root 进程崩溃读 /Library/Logs/DiagnosticReports/*.ips 的崩溃栈；
+3. `--register-helper` 无头模式 + `launchctl print system/local.diskprobe.helper`。
+另：SMAppService 对同签名 daemon 重复 register/unregister **不弹密码框**，属正常。
+
 ## ✅ 2026-08-29 对抗式审查发现的问题——已全部修复
 
 | # | 问题 | 位置 | 修法 |
