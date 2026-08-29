@@ -72,7 +72,7 @@ struct ScanControlBar: View {
 
             Spacer()
 
-            // 状态标签 + 特权助手提示 + 扫描错误提示
+            // 状态标签 + 特权助手状态 + 扫描错误提示
             HStack(spacing: 8) {
                 helperStatusView
                 if let err = appState.authError {
@@ -90,25 +90,53 @@ struct ScanControlBar: View {
     }
 
     @ViewBuilder private var helperStatusView: some View {
-        switch appState.helperStatus {
-        case .enabled:
+        if appState.helperOpInProgress {
+            ProgressView().controlSize(.small)
+            Text("正在更新特权助手…").font(.caption).foregroundStyle(.secondary)
+        } else {
+            switch appState.helperStatus {
+            case .enabled:
+                helperHealthView
+            case .requiresApproval:
+                Button("去系统设置批准特权助手") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .font(.caption).controlSize(.small)
+            default:
+                Button("安装特权助手") { appState.installHelper() }
+                    .font(.caption).controlSize(.small)
+            }
+            // 操作结果独立展示，不与健康状态混在一起；新操作开始或成功时自动清除
+            if let err = appState.helperOpError {
+                Text(err).font(.caption).foregroundStyle(.orange)
+            }
+        }
+    }
+
+    @ViewBuilder private var helperHealthView: some View {
+        switch appState.helperHealth {
+        case .ready:
             Label("特权助手已就绪", systemImage: "checkmark.shield.fill")
                 .font(.caption).foregroundStyle(.green)
-            // 已注册 ≠ 能跑：重新打包后旧注册会让 launchd 反复 spawn 失败，
-            // 常驻一个"重装"入口以便一键修复
+            // 常驻"重装"入口：重新打包后旧注册会让 launchd spawn 失败，一键修复
             Button("重装") { appState.reinstallHelper() }
                 .font(.caption).controlSize(.small)
                 .help("扫描报「特权助手未确认启动」时点这里重新注册")
-        case .requiresApproval:
-            Button("去系统设置批准特权助手") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
-            .font(.caption).controlSize(.small)
-        default:
-            Button("安装特权助手") { appState.installHelper() }
+        case .stale(let reported):
+            Label("助手版本过期（注册的是 \(reported)）", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                .font(.caption).foregroundStyle(.orange)
+            Button("重装特权助手") { appState.reinstallHelper() }
                 .font(.caption).controlSize(.small)
+        case .unreachable:
+            Label("已注册但助手无法启动", systemImage: "exclamationmark.shield.fill")
+                .font(.caption).foregroundStyle(.orange)
+            Button("重装特权助手") { appState.reinstallHelper() }
+                .font(.caption).controlSize(.small)
+        case .checking:
+            Label("特权助手检查中…", systemImage: "shield.lefthalf.filled")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 

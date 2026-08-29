@@ -10,10 +10,16 @@ public enum HelperIdentifiers {
     public static let appIdentifier = "local.diskprobe"
     /// helper 只接受整盘裸设备节点，杜绝分区/文件/符号链接
     public static let devicePathPattern = "^/dev/rdisk[0-9]+$"
+    /// helper 版本。ping 回传用于识别"注册的是旧版 helper"（重新打包后未重装的典型症状）。
+    /// 与 make_app.sh 里的 CFBundleShortVersionString 保持一致。
+    public static let helperVersion = "2.2"
 }
 
 /// helper 暴露给 app 的接口（root 权限运行）
 @objc public protocol HelperScanProtocol: NSObjectProtocol {
+    /// 健康检查：reply 传 helper 编译进二进制的版本号。
+    /// 用于验证 daemon 真的能被 launchd 拉起、且不是旧版本残留。
+    func ping(reply: @escaping (String?) -> Void)
     /// 打开设备并开始只读扫描。reply 传 nil 表示已开始；非 nil 为错误信息。
     /// 批量结果通过客户端实现的 HelperClientProtocol 回传。
     func startScan(devicePath: String, blockSize: UInt64,

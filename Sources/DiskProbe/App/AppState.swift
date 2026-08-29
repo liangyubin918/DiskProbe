@@ -3,11 +3,21 @@ import SwiftUI
 import ServiceManagement
 import DiskProbeCore
 
+// MARK: - 特权助手端到端健康状态
+
+/// SMAppService 的 .enabled 只表示"已注册"；重新打包后注册过期时
+/// daemon 实际 spawn 失败。此枚举用 ping 结果区分真实可用性。
+enum HelperHealth: Equatable {
+    case checking                       // ping 进行中
+    case ready                          // ping 通且版本与 app 一致
+    case stale(reported: String)        // ping 通但版本旧（注册的是旧版 helper）
+    case unreachable                    // ping 不通（daemon 起不来/被拒）
+}
+
 // MARK: - 全局 AppState（@MainActor，UI 持有）
 
 @MainActor
 final class AppState: ObservableObject {
-
     @Published var disks: [DiskInfo] = []
     @Published var selectedDisk: DiskInfo? = nil
     @Published var isEnumerating = false
@@ -41,6 +51,15 @@ final class AppState: ObservableObject {
 
     // 特权助手（SMAppService daemon）
     @Published var helperStatus: SMAppService.Status = .notRegistered
+    /// 端到端健康：ping 通且版本匹配才算就绪。status=.enabled 只代表"已注册"，
+    /// 重新打包后注册过期时 daemon 实际起不来，必须用 ping 区分。
+    @Published var helperHealth: HelperHealth = .checking
+    /// 安装/重装操作进行中
+    @Published var helperOpInProgress = false
+    /// 安装/重装操作的结果错误；成功或开始新操作时清空（避免旧错误粘滞显示）
+    @Published var helperOpError: String? = nil
+    private var pingGeneration = 0
+
     private var helperService: SMAppService {
         .daemon(plistName: HelperIdentifiers.launchdPlistName)
     }
@@ -79,23 +98,36 @@ final class AppState: ObservableObject {
 
     func refreshHelperStatus() {
         helperStatus = helperService.status
+        refreshHelperHealth()
+    }
+
+    /// 已注册时用 ping 验证 daemon 真的能启动、且不是旧版本残留。
+    /// 带代数序号：连续刷新时只有最后一次的 ping 结果生效。
+    private func refreshHelperHealth() {
+        guard helperStatus == .enabled else {
+            helperHealth = .checking
+            return
+        }
+        pingGeneration += 1
+        let gen = pingGeneration
+        helperHealth = .checking
+        Task {
+            let version = await RealScanSession.ping()
+            guard gen == self.pingGeneration, self.helperStatus == .enabled else { return }
+            switch version {
+            case .some(let v) where v == "DiskProbeHelper \(HelperIdentifiers.helperVersion)":
+                self.helperHealth = .ready
+            case .some(let v):
+                self.helperHealth = .stale(reported: v)
+            case .none:
+                self.helperHealth = .unreachable
+            }
+        }
     }
 
     /// 安装特权助手（系统会弹管理员密码确认）。必须从 .app bundle 运行。
     func installHelper() {
-        Task {
-            // register() 是同步阻塞调用（等用户输密码可能数秒），
-            // 必须放后台线程，否则管理员确认期间整个 UI 冻结
-            let service = helperService
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                do { try service.register(); return .success(()) }
-                catch { return .failure(error) }
-            }.value
-            helperStatus = helperService.status
-            if case .failure(let error) = result {
-                authError = "安装特权助手失败：\(error.localizedDescription)"
-            }
-        }
+        runHelperOperation(reinstall: false)
     }
 
     /// 重装特权助手：先注销旧注册再重新注册。
@@ -103,17 +135,54 @@ final class AppState: ObservableObject {
     /// 反复 spawn 失败（launchctl 显示 last exit code = 78 EX_CONFIG），
     /// 表现为扫描时"特权助手未确认启动"。重装是唯一治本手段。
     func reinstallHelper() {
+        runHelperOperation(reinstall: true)
+    }
+
+    private func runHelperOperation(reinstall: Bool) {
+        guard !helperOpInProgress else { return }
+        helperOpInProgress = true
+        helperOpError = nil
+        authError = nil
+
+        let service = helperService
         Task {
-            let service = helperService
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                // 忽略注销失败（可能本来就未注册）
-                try? service.unregister()
-                do { try service.register(); return .success(()) }
-                catch { return .failure(error) }
-            }.value
+            // register()/unregister() 是同步阻塞调用（等用户输密码可能数秒），
+            // 必须放后台线程，否则管理员确认期间整个 UI 冻结
+            let outcome: (ok: Bool, unregisterError: String?, registerError: String?) =
+                await Task.detached(priority: .userInitiated) {
+                    var unregisterError: String? = nil
+                    if reinstall {
+                        do { try service.unregister() }
+                        catch { unregisterError = error.localizedDescription }
+                    }
+                    do {
+                        try service.register()
+                        return (true, unregisterError, nil)
+                    } catch {
+                        return (false, unregisterError, error.localizedDescription)
+                    }
+                }.value
+
             helperStatus = helperService.status
-            if case .failure(let error) = result {
-                authError = "重装特权助手失败：\(error.localizedDescription)"
+            refreshHelperHealth()
+            helperOpInProgress = false
+
+            // 结果呈现：成功清掉旧错误；失败区分"未完成"与"已成功但有小问题"
+            if outcome.ok {
+                if let unregErr = outcome.unregisterError {
+                    helperOpError = "已重新注册，但注销旧注册时报错：\(unregErr)。若扫描仍报助手未确认启动，请再重装一次。"
+                } else {
+                    helperOpError = nil
+                }
+            } else {
+                let detail = outcome.registerError ?? "未知错误"
+                if detail.contains("取消") {
+                    helperOpError = "已取消，特权助手未做更改。"
+                } else if helperStatus == .enabled {
+                    helperOpError = "注册更新失败（\(detail)），当前仍是旧注册。请再试一次重装。"
+                } else {
+                    helperOpError = "\(reinstall ? "重装" : "安装")特权助手失败：\(detail)"
+                }
             }
         }
     }
@@ -169,6 +238,7 @@ final class AppState: ObservableObject {
         guard let d = selectedDisk else { return }
         progress = nil
         authError = nil
+        helperOpError = nil
         resetStats()
 
         // 初始化地图

@@ -70,7 +70,7 @@ final class RealScanSession: NSObject, HelperClientProtocol {
             self.ackTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(Self.ackTimeout * 1_000_000_000))
                 guard let self, self.resumeAck(false) else { return }
-                self.finish(error: "特权助手 \(Int(Self.ackTimeout)) 秒内未确认启动。")
+                self.finish(error: "特权助手 \(Int(Self.ackTimeout)) 秒内未确认启动（注册信息可能过期，请点「重装特权助手」）。")
             }
         }
         return acked ? stream : nil
@@ -138,4 +138,68 @@ final class RealScanSession: NSObject, HelperClientProtocol {
         continuation?.finish()
         continuation = nil
     }
+
+    // MARK: 健康检查
+
+    /// 用一次性连接 ping helper。返回版本串；nil 表示无法启动/超时/被拒。
+    /// 用于把 SMAppService 的"已注册"和"真的能跑"区分开——重新打包后
+    /// 注册信息过期时，status 仍是 enabled 但 daemon 实际 spawn 失败。
+    static func ping(timeout: TimeInterval = 5) async -> String? {
+        let pinger = HelperPinger()
+        return await withCheckedContinuation { cont in
+            pinger.start(timeout: timeout, continuation: cont)
+        }
+    }
+}
+
+/// 一次性健康检查连接。生命周期：start → 回复/断开/超时 三者最先发生者终结。
+private final class HelperPinger: NSObject, HelperClientProtocol {
+    private let lock = NSLock()
+    private var resumed = false
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var connection: NSXPCConnection?
+    private var timeoutTask: Task<Void, Never>?
+
+    func start(timeout: TimeInterval, continuation: CheckedContinuation<String?, Never>) {
+        self.continuation = continuation
+        let connection = NSXPCConnection(machServiceName: HelperIdentifiers.machServiceName)
+        connection.remoteObjectInterface = NSXPCInterface(with: HelperScanProtocol.self)
+        connection.exportedInterface = NSXPCInterface(with: HelperClientProtocol.self)
+        connection.exportedObject = self
+        connection.invalidationHandler = { [weak self] in
+            self?.resume(nil)
+        }
+        self.connection = connection
+        connection.resume()
+
+        guard let proxy = connection.remoteObjectProxy as? HelperScanProtocol else {
+            resume(nil)
+            return
+        }
+        proxy.ping { [weak self] version in
+            self?.resume(version)
+        }
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            self?.resume(nil)
+        }
+    }
+
+    private func resume(_ version: String?) {
+        lock.lock()
+        guard !resumed else { lock.unlock(); return }
+        resumed = true
+        let cont = continuation
+        continuation = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        lock.unlock()
+        cont?.resume(returning: version)
+        connection?.invalidate()
+        connection = nil
+    }
+
+    // HelperClientProtocol 空实现：ping 流程 helper 不会回调这些方法
+    func onBatch(_ data: Data) {}
+    func onDone(_ errorMessage: String?) {}
 }

@@ -35,6 +35,10 @@ final class ScanRunner: NSObject, HelperScanProtocol {
 
     // MARK: XPC 接口（连接队列调用）
 
+    func ping(reply: @escaping (String?) -> Void) {
+        reply("DiskProbeHelper \(HelperIdentifiers.helperVersion)")
+    }
+
     func startScan(devicePath: String, blockSize: UInt64, reply: @escaping (String?) -> Void) {
         lock.lock()
         let busy = fd != -1
