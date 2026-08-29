@@ -29,5 +29,11 @@ let package = Package(
             dependencies: ["DiskProbeCore"],
             path: "Sources/DiskProbe"
         ),
+
+        .testTarget(
+            name: "DiskProbeTests",
+            dependencies: ["DiskProbe", "DiskProbeCore"],
+            path: "Tests/DiskProbeTests"
+        ),
     ]
 )

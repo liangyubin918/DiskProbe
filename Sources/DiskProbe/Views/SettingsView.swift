@@ -27,16 +27,23 @@ struct SettingsView: View {
         .padding(20)
         .frame(width: 420)
         .navigationTitle("DiskProbe 设置")
+        .onAppear {
+            // 打开窗口时与当前生效阈值同步（阈值已通过 UserDefaults 持久化）
+            thresholdWarnMs = appState.thresholds.warnMs
+            thresholdAbnormalMs = appState.thresholds.abnormalMs
+        }
     }
 
-    // 用 @State 做输入缓冲，提交时再写回 thresholds
-    @State private var thresholdWarnMs: Double = 100
-    @State private var thresholdAbnormalMs: Double = 500
+    // @AppStorage 持久化到 UserDefaults，AppState 启动时读同一组 key
+    @AppStorage("scan.warnMs") private var thresholdWarnMs: Double = 100
+    @AppStorage("scan.abnormalMs") private var thresholdAbnormalMs: Double = 500
 
     private func commit() {
         // 保证 warn < abnormal
         let w = max(1, thresholdWarnMs)
         let a = max(w + 1, thresholdAbnormalMs)
+        thresholdWarnMs = w
+        thresholdAbnormalMs = a
         appState.thresholds = ScanThresholds(warnMs: w, abnormalMs: a)
     }
 }

@@ -21,6 +21,17 @@ public enum BlockStatus: String, Codable, Sendable, CaseIterable {
         case .unscanned: return "unscanned"
         }
     }
+
+    /// 严重程度排序：地图格子里多个块共用一格时，取最严重的状态
+    public var severityOrder: Int {
+        switch self {
+        case .unscanned: return 0
+        case .normal:    return 1
+        case .warning:   return 2
+        case .abnormal:  return 3
+        case .error:     return 4
+        }
+    }
 }
 
 // MARK: - 扫描阈值（可调整参数）

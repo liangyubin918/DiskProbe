@@ -17,8 +17,22 @@ final class AppState: ObservableObject {
     @Published var smartError: String? = nil
     @Published var isReadingSMART = false
 
-    @Published var thresholds: ScanThresholds = .init() {
-        didSet { Task { await engine.updateThresholds(thresholds) } }
+    @Published var thresholds: ScanThresholds = {
+        let defaults = UserDefaults.standard
+        return ScanThresholds(
+            warnMs: defaults.object(forKey: "scan.warnMs") as? Double ?? 100,
+            abnormalMs: defaults.object(forKey: "scan.abnormalMs") as? Double ?? 500
+        )
+    }() {
+        didSet {
+            // 去抖同步给引擎：快速连续调整时只有最后一次生效，避免乱序覆盖
+            thresholdSyncTask?.cancel()
+            thresholdSyncTask = Task { [thresholds] in
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard !Task.isCancelled else { return }
+                await engine.updateThresholds(thresholds)
+            }
+        }
     }
 
     @Published var progress: ScanProgress? = nil
@@ -32,11 +46,10 @@ final class AppState: ObservableObject {
     // SMART 请求序号（防陈旧结果覆盖）
     private var smartRequestID = 0
 
-    // 扫描地图格子（固定大小，每格代表一组块，增量更新）
+    // 扫描地图格子（引擎随进度事件附带完整快照，UI 只做赋值）
     @Published var mapCells: [BlockStatus] = []
-    @Published var mapCellCount: Int = 0
 
-    // 统计计数（真实模式从每块结果累计）
+    // 统计计数（从进度事件的累计 summary 取值）
     @Published var statNormal = 0
     @Published var statWarning = 0
     @Published var statAbnormal = 0
@@ -45,10 +58,10 @@ final class AppState: ObservableObject {
     // 地图尺寸
     let mapColumns = 100
     let mapRows = 60
-    private var cellsPerBlockGroup: Int = 1
 
     // 进度监听任务（保证任意时刻只有一个消费者，避免事件被瓜分）
     private var listenerTask: Task<Void, Never>? = nil
+    private var thresholdSyncTask: Task<Void, Never>? = nil
 
     let engine = ScanEngine()
 
@@ -124,7 +137,12 @@ final class AppState: ObservableObject {
                     return
                 }
             }
-            let started = await engine.start(disk: d, blockSize: Int64(blockSizeKB) * 1024, useReal: useRealScan)
+            let started = await engine.start(
+                disk: d,
+                blockSize: Int64(blockSizeKB) * 1024,
+                cellCount: mapColumns * mapRows,
+                useReal: useRealScan
+            )
             guard started else {
                 authError = await engine.takeLastAuthError() ?? "无法开始扫描。"
                 await syncState()
@@ -149,49 +167,25 @@ final class AppState: ObservableObject {
 
     private func listenProgress() async {
         for await p in await engine.progress() {
-            self.progress = p
-            updateMap(p)
+            applyProgress(p)
             await syncState()
         }
         await syncState()
     }
 
-    // MARK: 地图增量更新
+    // MARK: 进度应用
 
-    private func updateMap(_ p: ScanProgress) {
-        if mapCells.count == mapColumns * mapRows && p.totalBlocks > 0 {
-            // 向上取整：保证 cellsPerBlockGroup 不会超过格子总数。
-            // 旧版用向下取整，磁盘 > ~4.7TB（128KB 块）时 group > 6000，
-            // 下面这个 guard 永远失败，地图和统计会完全冻结。
-            cellsPerBlockGroup = max(1, (p.totalBlocks + mapCells.count - 1) / mapCells.count)
+    /// 进度事件是引擎产生的完整快照（地图 + 累计统计），UI 直接取值。
+    /// 即使事件被缓冲策略合并丢弃，下一次事件仍是正确状态。
+    private func applyProgress(_ p: ScanProgress) {
+        progress = p
+        if p.mapCells.count == mapColumns * mapRows {
+            mapCells = p.mapCells
         }
-        guard cellsPerBlockGroup > 0 else { return }
-
-        let cellIndex = min(mapCells.count - 1, p.currentIndex / cellsPerBlockGroup)
-        let status = p.lastBlock.status
-
-        // 统计计数
-        switch status {
-        case .normal:    statNormal += 1
-        case .warning:   statWarning += 1
-        case .abnormal:  statAbnormal += 1
-        case .error:     statError += 1
-        case .unscanned: break
-        }
-
-        if severity(status) > severity(mapCells[cellIndex]) {
-            mapCells[cellIndex] = status
-        }
-    }
-
-    private func severity(_ s: BlockStatus) -> Int {
-        switch s {
-        case .unscanned: return 0
-        case .normal:    return 1
-        case .warning:   return 2
-        case .abnormal:  return 3
-        case .error:     return 4
-        }
+        statNormal = p.summary.normal
+        statWarning = p.summary.warning
+        statAbnormal = p.summary.abnormal
+        statError = p.summary.error
     }
 
     private func resetStats() {

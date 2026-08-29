@@ -25,12 +25,25 @@ actor ScanEngine {
     private(set) var totalBlocks = 0
     private(set) var diskSize: Int64 = 0
     private(set) var blockSize: Int64 = 128 * 1024
+
+    // 地图快照由引擎维护：每个进度事件都是完整快照，事件被丢弃/合并也不影响
+    // 地图与统计的正确性（配合 bufferingNewest(1) 缓冲策略）
+    private var map: [BlockStatus] = []
+    private var cellCount = 0
+    private var cellsPerGroup = 1
+
     private var speedSamples: [(elapsed: TimeInterval, blocksDone: Int)] = []
 
     private(set) var lastAuthError: String?
 
     init(thresholds: ScanThresholds = .init()) {
         self.thresholds = thresholds
+    }
+
+    /// 把块数分组映射到固定格子数：向上取整，保证任何容量都能覆盖全部格子。
+    static func cellsPerBlockGroup(totalBlocks: Int, cellCount: Int) -> Int {
+        guard totalBlocks > 0, cellCount > 0 else { return 1 }
+        return (totalBlocks + cellCount - 1) / cellCount
     }
 
     func authenticate(disk: DiskInfo, blockSize: Int64 = 128 * 1024) async -> Bool {
@@ -49,7 +62,7 @@ actor ScanEngine {
 
     /// 开始演示扫描。返回 false 表示未能启动，原因见 takeLastAuthError()。
     @discardableResult
-    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, useReal: Bool = false) -> Bool {
+    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000, useReal: Bool = false) -> Bool {
         guard state == .idle || state == .finished || state == .stopped || state == .error else {
             lastAuthError = "扫描正在进行中，请先停止当前扫描。"
             return false
@@ -71,12 +84,17 @@ actor ScanEngine {
         self.diskSize = disk.sizeBytes
         self.blockSize = blockSize
         self.totalBlocks = max(1, Int(quotient + (remainder == 0 ? 0 : 1)))
+        self.cellCount = max(1, cellCount)
+        self.cellsPerGroup = Self.cellsPerBlockGroup(totalBlocks: self.totalBlocks, cellCount: self.cellCount)
+        self.map = Array(repeating: .unscanned, count: self.cellCount)
         self.useRealReader = false
         self.stopRequested = false
         self.pauseRequested = false
         self.speedSamples = []
 
-        let (stream, continuation) = AsyncStream<ScanProgress>.makeStream()
+        // 只保留最新事件：进度是全量快照，丢弃旧事件不影响正确性，
+        // 也避免消费端卡顿时 unbounded 缓冲无限增长
+        let (stream, continuation) = AsyncStream<ScanProgress>.makeStream(of: ScanProgress.self, bufferingPolicy: .bufferingNewest(1))
         progressAsyncStream = stream
         progressStream = continuation
         state = .scanning
@@ -123,6 +141,7 @@ actor ScanEngine {
 
     private func runMockScan(disk: DiskInfo, runID: UUID, scanStart: Date) async {
         var scanned = 0
+        var summary = ScanSummary(unscanned: totalBlocks)
         // 暂停时长不计入 elapsed，否则 ETA 会被暂停时间永久推高
         var pausedTotal: TimeInterval = 0
         var pauseBegan: Date? = nil
@@ -171,6 +190,19 @@ actor ScanEngine {
                 errnoValue: failed ? 5 : nil
             )
             scanned += 1
+            // 引擎侧累计统计与地图快照（UI 直接取值，不依赖每个事件都被消费）
+            switch block.status {
+            case .normal:   summary.normal += 1
+            case .warning:  summary.warning += 1
+            case .abnormal: summary.abnormal += 1
+            case .error:    summary.error += 1
+            case .unscanned: break
+            }
+            summary.unscanned -= 1
+            let cellIndex = min(cellCount - 1, i / cellsPerGroup)
+            if block.status.severityOrder > map[cellIndex].severityOrder {
+                map[cellIndex] = block.status
+            }
             let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
             let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
             let remaining = max(0, totalBlocks - scanned)
@@ -183,7 +215,8 @@ actor ScanEngine {
                 speedMBps: speed,
                 etaSeconds: eta,
                 lastBlock: block,
-                summary: summarize(scanned: scanned)
+                summary: summary,
+                mapCells: map
             )
             guard isCurrent(runID) else { return }
             progressStream?.yield(progress)
@@ -216,10 +249,6 @@ actor ScanEngine {
         let blocks = scanned - first.blocksDone
         return duration > 0.05 ? Double(blocks) * Double(blockSize) / 1024 / 1024 / duration : 0
     }
-
-    private func summarize(scanned: Int) -> ScanSummary {
-        ScanSummary(unscanned: max(0, totalBlocks - scanned))
-    }
 }
 
 // MARK: - 扫描状态与进度模型
@@ -241,7 +270,10 @@ struct ScanProgress: Sendable {
     let speedMBps: Double
     let etaSeconds: TimeInterval
     let lastBlock: ScanBlock
+    /// 引擎累计的分类统计（含未扫描数）
     let summary: ScanSummary
+    /// 完整地图快照，与引擎内部维护的 map 一致
+    let mapCells: [BlockStatus]
 
     var fraction: Double {
         totalBlocks == 0 ? 0 : min(1, Double(scannedCount) / Double(totalBlocks))

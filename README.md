@@ -21,6 +21,8 @@ open dist/DiskProbe.app  # 双击启动
 ```bash
 swift build                    # 编译
 swift run DiskProbe            # 或直接运行 .build/debug/DiskProbe
+# 单元测试需要完整 Xcode 工具链（Command Line Tools 不带测试框架）：
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
 ## 功能
