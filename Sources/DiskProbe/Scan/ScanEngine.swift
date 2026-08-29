@@ -29,7 +29,7 @@ actor ScanEngine {
 
     // 地图快照由引擎维护：每个进度事件都是完整快照，事件被丢弃/合并也不影响
     // 地图与统计的正确性（配合 bufferingNewest(1) 缓冲策略）
-    private var map: [BlockStatus] = []
+    private var map: [MapCell] = []
     private var cellCount = 0
     private var cellsPerGroup = 1
 
@@ -45,6 +45,14 @@ actor ScanEngine {
     static func cellsPerBlockGroup(totalBlocks: Int, cellCount: Int) -> Int {
         guard totalBlocks > 0, cellCount > 0 else { return 1 }
         return (totalBlocks + cellCount - 1) / cellCount
+    }
+
+    /// 格子合并：更严重的状态覆盖；同级用最新采样刷新（悬停可见最新耗时）。
+    static func mergedCell(_ old: MapCell, status: BlockStatus, elapsedMs: Double, blockIndex: Int) -> MapCell {
+        if status.severityOrder >= old.status.severityOrder {
+            return MapCell(status: status, elapsedMs: elapsedMs, blockIndex: blockIndex)
+        }
+        return old
     }
 
     func takeLastAuthError() -> String? {
@@ -204,9 +212,8 @@ actor ScanEngine {
                 case .unscanned: break
                 }
                 let cellIndex = min(cellCount - 1, i / cellsPerGroup)
-                if block.status.severityOrder > map[cellIndex].severityOrder {
-                    map[cellIndex] = block.status
-                }
+                map[cellIndex] = Self.mergedCell(map[cellIndex], status: block.status,
+                                                 elapsedMs: block.elapsedMs, blockIndex: i)
                 lastBlock = block
             }
 
@@ -289,7 +296,7 @@ struct ScanProgress: Sendable {
     /// 引擎累计的分类统计（含未扫描数）
     let summary: ScanSummary
     /// 完整地图快照，与引擎内部维护的 map 一致
-    let mapCells: [BlockStatus]
+    let mapCells: [MapCell]
 
     var fraction: Double {
         totalBlocks == 0 ? 0 : min(1, Double(scannedCount) / Double(totalBlocks))

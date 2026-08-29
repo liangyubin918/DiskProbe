@@ -346,7 +346,7 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
         }
 
         let clientID = signingIdentifier(client)
-        guard clientID == HelperIdentifiers.appIdentifier else {
+        guard let clientID, clientID == HelperIdentifiers.appIdentifier else {
             NSLog("[DiskProbeHelper] 校验失败：identifier 不匹配（实际 \(clientID ?? "nil")）")
             return false
         }
@@ -357,7 +357,7 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
             NSLog("[DiskProbeHelper] 校验失败：团队不匹配（client=\(clientTeam ?? "nil") self=\(selfTeam ?? "nil")）")
             return false
         }
-        NSLog("[DiskProbeHelper] 接受连接：identifier=\(clientID) team=\(clientTeam)")
+        fputs("[DiskProbeHelper] 接受连接：identifier=\(clientID) team=\(clientTeam)\n", stderr)
         return true
     }
 

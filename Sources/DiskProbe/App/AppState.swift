@@ -82,7 +82,7 @@ final class AppState: ObservableObject {
     private var smartRequestID = 0
 
     // 扫描地图格子（引擎随进度事件附带完整快照，UI 只做赋值）
-    @Published var mapCells: [BlockStatus] = []
+    @Published var mapCells: [MapCell] = []
 
     // 统计计数（从进度事件的累计 summary 取值）
     @Published var statNormal = 0

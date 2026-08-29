@@ -73,3 +73,21 @@ public struct ScanBlock: Identifiable, Sendable {
         self.elapsedMs = elapsedMs; self.status = status; self.errnoValue = errnoValue
     }
 }
+
+// MARK: - 扫描地图格子
+
+/// 地图单个格子的聚合信息：颜色取格内最严重块的状态，
+/// 悬停提示展示格子编号与定格该状态的采样耗时。
+public struct MapCell: Sendable, Equatable {
+    public var status: BlockStatus
+    public var elapsedMs: Double
+    public var blockIndex: Int    // -1 = 未扫描
+
+    public static let unscanned = MapCell(status: .unscanned, elapsedMs: 0, blockIndex: -1)
+
+    public init(status: BlockStatus, elapsedMs: Double, blockIndex: Int) {
+        self.status = status
+        self.elapsedMs = elapsedMs
+        self.blockIndex = blockIndex
+    }
+}

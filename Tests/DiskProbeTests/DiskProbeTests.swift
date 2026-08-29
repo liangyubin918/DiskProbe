@@ -164,3 +164,34 @@ import Testing
         #expect(ScanRunner.deviceProblem("/dev/disk8") != nil)
     }
 }
+
+// MARK: 地图格子合并（悬停信息管道）
+
+@Suite struct MapCellMergeTests {
+    @Test func moreSevereOverrides() {
+        let old = MapCell(status: .normal, elapsedMs: 5, blockIndex: 1)
+        let merged = ScanEngine.mergedCell(old, status: .abnormal, elapsedMs: 300, blockIndex: 2)
+        #expect(merged.status == .abnormal)
+        #expect(merged.elapsedMs == 300)
+        #expect(merged.blockIndex == 2)
+    }
+
+    @Test func lessSevereKeepsOld() {
+        let old = MapCell(status: .error, elapsedMs: 900, blockIndex: 7)
+        let merged = ScanEngine.mergedCell(old, status: .warning, elapsedMs: 120, blockIndex: 8)
+        #expect(merged == old)
+    }
+
+    @Test func equalSeverityRefreshesSample() {
+        let old = MapCell(status: .warning, elapsedMs: 120, blockIndex: 3)
+        let merged = ScanEngine.mergedCell(old, status: .warning, elapsedMs: 150, blockIndex: 4)
+        #expect(merged.status == .warning)
+        #expect(merged.elapsedMs == 150)
+        #expect(merged.blockIndex == 4)
+    }
+
+    @Test func unscannedCellYieldsToAnything() {
+        let merged = ScanEngine.mergedCell(.unscanned, status: .normal, elapsedMs: 4, blockIndex: 0)
+        #expect(merged.status == .normal)
+    }
+}
