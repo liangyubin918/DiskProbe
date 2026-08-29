@@ -3,19 +3,16 @@ import DiskProbeCore
 
 // MARK: - 扫描引擎
 //
-// 扫描分两种模式：
-//   - 演示模式（useReal=false）：模拟数据，不接触设备。
-//   - 真实模式（useReal=true）：由 SMAppService 安装、签名校验的 XPC
-//     privileged helper（DiskProbeHelper，root 权限 launchd daemon）执行
-//     只读裸设备扫描，本 actor 消费其批次流做分类/统计/地图。
+// 只有一种模式：真实只读扫描。由 SMAppService 安装、签名校验的 XPC
+// privileged helper（DiskProbeHelper，root 权限 launchd daemon）执行
+// 只读裸设备扫描，本 actor 消费其批次流做分类/统计/地图/速度/ETA。
 // 旧版 AuthorizationExecuteWithPrivileges 提权方案存在本地提权风险，已废弃。
 //
-// 注意：真实模式必须从 .app bundle 启动（SMAppService 要求），swift run 不可用。
+// 注意：必须从 .app bundle 启动（SMAppService 要求），swift run 不可用。
 
 actor ScanEngine {
     private(set) var state: ScanState = .idle
     private(set) var thresholds: ScanThresholds
-    private(set) var useRealReader = false
 
     private var pauseRequested = false
     private var stopRequested = false
@@ -55,11 +52,10 @@ actor ScanEngine {
         return lastAuthError
     }
 
-    /// 开始扫描。useReal=false 为演示模式（模拟数据）；
-    /// useReal=true 通过特权 XPC helper 做真实只读扫描。
+    /// 开始真实只读扫描（通过特权 XPC helper）。
     /// 返回 false 表示未能启动，原因见 takeLastAuthError()。
     @discardableResult
-    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000, useReal: Bool = false) async -> Bool {
+    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000) async -> Bool {
         guard state == .idle || state == .finished || state == .stopped || state == .error else {
             lastAuthError = "扫描正在进行中，请先停止当前扫描。"
             return false
@@ -70,17 +66,13 @@ actor ScanEngine {
             return false
         }
 
-        var batchStream: AsyncStream<ScanBatch>? = nil
-        if useReal {
-            let session = RealScanSession()
-            guard let stream = await session.begin(bsdName: disk.bsdName, blockSize: UInt64(blockSize)) else {
-                state = .error
-                lastAuthError = session.lastError ?? "无法连接特权助手。请先安装特权助手，并从 .app 启动（swift run 模式不支持）。"
-                return false
-            }
-            realSession = session
-            batchStream = stream
+        let session = RealScanSession()
+        guard let batchStream = await session.begin(bsdName: disk.bsdName, blockSize: UInt64(blockSize)) else {
+            state = .error
+            lastAuthError = session.lastError ?? "无法连接特权助手。若已安装仍失败，请在 app 内点「重装特权助手」重新注册后重试。"
+            return false
         }
+        realSession = session
 
         let quotient = disk.sizeBytes / blockSize
         let remainder = disk.sizeBytes % blockSize
@@ -91,7 +83,6 @@ actor ScanEngine {
         self.cellCount = max(1, cellCount)
         self.cellsPerGroup = Self.cellsPerBlockGroup(totalBlocks: self.totalBlocks, cellCount: self.cellCount)
         self.map = Array(repeating: .unscanned, count: self.cellCount)
-        self.useRealReader = useReal
         self.stopRequested = false
         self.pauseRequested = false
         self.speedSamples = []
@@ -105,14 +96,8 @@ actor ScanEngine {
 
         let runID = UUID()
         currentRunID = runID
-        if useReal, let batchStream {
-            task = Task { [weak self] in
-                await self?.runRealScan(runID: runID, scanStart: Date(), batches: batchStream)
-            }
-        } else {
-            task = Task { [weak self] in
-                await self?.runMockScan(disk: disk, runID: runID, scanStart: Date())
-            }
+        task = Task { [weak self] in
+            await self?.runRealScan(runID: runID, scanStart: Date(), batches: batchStream)
         }
         return true
     }
@@ -151,93 +136,6 @@ actor ScanEngine {
 
     func progress() -> AsyncStream<ScanProgress> {
         progressAsyncStream ?? AsyncStream { $0.finish() }
-    }
-
-    private func runMockScan(disk: DiskInfo, runID: UUID, scanStart: Date) async {
-        var scanned = 0
-        var summary = ScanSummary(unscanned: totalBlocks)
-        // 暂停时长不计入 elapsed，否则 ETA 会被暂停时间永久推高
-        var pausedTotal: TimeInterval = 0
-        var pauseBegan: Date? = nil
-        for i in 0..<totalBlocks {
-            guard isCurrent(runID) else { return }
-            if Task.isCancelled || stopRequested {
-                finish(runID: runID, state: .stopped)
-                return
-            }
-            while pauseRequested {
-                if pauseBegan == nil { pauseBegan = Date() }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                guard isCurrent(runID) else { return }
-                if Task.isCancelled || stopRequested {
-                    finish(runID: runID, state: .stopped)
-                    return
-                }
-            }
-            if let began = pauseBegan {
-                pausedTotal += Date().timeIntervalSince(began)
-                pauseBegan = nil
-            }
-
-            let (offset, overflow) = Int64(i).multipliedReportingOverflow(by: blockSize)
-            guard !overflow, offset >= 0, offset < diskSize else {
-                finish(runID: runID, state: .error)
-                return
-            }
-            let size = min(blockSize, diskSize - offset)
-            let random = Double.random(in: 0..<1)
-            var elapsedMs = Double.random(in: 3..<20)
-            var failed = false
-            if random < 0.0005 {
-                elapsedMs = Double.random(in: 800..<2000)
-                failed = true
-            } else if random < 0.003 {
-                elapsedMs = Double.random(in: 120..<900)
-            }
-
-            let block = ScanBlock(
-                id: i,
-                startOffset: offset,
-                size: size,
-                elapsedMs: elapsedMs,
-                status: thresholds.classify(elapsedMs: elapsedMs, failed: failed),
-                errnoValue: failed ? 5 : nil
-            )
-            scanned += 1
-            // 引擎侧累计统计与地图快照（UI 直接取值，不依赖每个事件都被消费）
-            switch block.status {
-            case .normal:   summary.normal += 1
-            case .warning:  summary.warning += 1
-            case .abnormal: summary.abnormal += 1
-            case .error:    summary.error += 1
-            case .unscanned: break
-            }
-            // unscanned 由总数减去已扫数推导，避免与 helper 实际可读范围有 ±1 块的漂移
-            summary.unscanned = max(0, totalBlocks - scanned)
-            let cellIndex = min(cellCount - 1, i / cellsPerGroup)
-            if block.status.severityOrder > map[cellIndex].severityOrder {
-                map[cellIndex] = block.status
-            }
-            let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
-            let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
-            let remaining = max(0, totalBlocks - scanned)
-            let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
-            let progress = ScanProgress(
-                currentIndex: i,
-                totalBlocks: totalBlocks,
-                scannedCount: scanned,
-                elapsedSeconds: elapsed,
-                speedMBps: speed,
-                etaSeconds: eta,
-                lastBlock: block,
-                summary: summary,
-                mapCells: map
-            )
-            guard isCurrent(runID) else { return }
-            progressStream?.yield(progress)
-            try? await Task.sleep(nanoseconds: 3_000_000)
-        }
-        finish(runID: runID, state: .finished)
     }
 
     /// 真实扫描：消费 helper 回传的批次流，复用与演示扫描相同的

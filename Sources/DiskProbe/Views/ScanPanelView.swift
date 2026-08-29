@@ -53,18 +53,12 @@ struct ScanPanelView: View {
     private var confirmMessage: String {
         var s = "将以**只读**方式顺序读取整个磁盘的扇区，不会修改任何数据。\n"
         s += "目标：\(disk.displayName)（/dev/\(disk.bsdName)，\(disk.sizeDescription)）\n"
-        if appState.useRealScan {
-            s += "\n当前为**真实扫描**：通过已安装的特权助手直接读取盘面，速度/进度/坏道均为真实数据。\n"
-            s += "预计耗时：按 150 MB/s 估算约 \(estimateDuration(disk.sizeBytes))。"
-        } else {
-            s += "\n当前为演示扫描：使用模拟数据，不读取真实磁盘。"
-        }
+        s += "\n通过已安装的特权助手直接读取盘面，速度/进度/坏道均为真实数据。\n"
+        s += "预计耗时：按 150 MB/s 估算约 \(estimateDuration(disk.sizeBytes))。"
         if disk.isInternal {
             s += "\n\n⚠️ 这是**系统盘**。扫描时系统会同时访问它，结果可能被干扰，且扫描时间较长。建议扫描时尽量减少其他操作。"
         }
-        if appState.useRealScan {
-            s += "\n\n建议先在「磁盘工具」中卸载目标卷，以获得不被系统读写干扰的结果。"
-        }
+        s += "\n\n建议先在「磁盘工具」中卸载目标卷，以获得不被系统读写干扰的结果。"
         return s
     }
 

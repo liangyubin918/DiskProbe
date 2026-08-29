@@ -358,6 +358,7 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
 @main
 struct HelperMain {
     static func main() {
+        NSLog("[DiskProbeHelper] helper launched (pid %d)", getpid())
         let listener = NSXPCListener.service()
         let delegate = HelperDelegate()
         listener.delegate = delegate

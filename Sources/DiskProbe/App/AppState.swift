@@ -38,7 +38,6 @@ final class AppState: ObservableObject {
 
     @Published var progress: ScanProgress? = nil
     @Published var scanState: ScanState = .idle
-    @Published var useRealScan: Bool = false // false=演示扫描；true=真实只读扫描（需特权助手）
 
     // 特权助手（SMAppService daemon）
     @Published var helperStatus: SMAppService.Status = .notRegistered
@@ -46,8 +45,7 @@ final class AppState: ObservableObject {
         .daemon(plistName: HelperIdentifiers.launchdPlistName)
     }
 
-    // 认证状态
-    @Published var isAuthenticating = false
+    // 扫描错误提示
     @Published var authError: String? = nil
 
     // SMART 请求序号（防陈旧结果覆盖）
@@ -96,6 +94,26 @@ final class AppState: ObservableObject {
             helperStatus = helperService.status
             if case .failure(let error) = result {
                 authError = "安装特权助手失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// 重装特权助手：先注销旧注册再重新注册。
+    /// app bundle 被替换后（重新打包/移动位置），launchd/BTM 缓存的旧注册会
+    /// 反复 spawn 失败（launchctl 显示 last exit code = 78 EX_CONFIG），
+    /// 表现为扫描时"特权助手未确认启动"。重装是唯一治本手段。
+    func reinstallHelper() {
+        Task {
+            let service = helperService
+            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
+                // 忽略注销失败（可能本来就未注册）
+                try? service.unregister()
+                do { try service.register(); return .success(()) }
+                catch { return .failure(error) }
+            }.value
+            helperStatus = helperService.status
+            if case .failure(let error) = result {
+                authError = "重装特权助手失败：\(error.localizedDescription)"
             }
         }
     }
@@ -159,16 +177,16 @@ final class AppState: ObservableObject {
         // 取消旧监听，保证进度流始终只有一个消费者
         listenerTask?.cancel()
         listenerTask = Task {
-            if useRealScan && helperStatus != .enabled {
-                authError = "真实扫描需要先安装特权助手（含 root 授权）。"
+            refreshHelperStatus()
+            guard helperStatus == .enabled else {
+                authError = "真实扫描需要先安装特权助手（含 root 授权）。若已安装仍失败，请点「重装特权助手」。"
                 await syncState()
                 return
             }
             let started = await engine.start(
                 disk: d,
                 blockSize: Int64(blockSizeKB) * 1024,
-                cellCount: mapColumns * mapRows,
-                useReal: useRealScan
+                cellCount: mapColumns * mapRows
             )
             guard started else {
                 authError = await engine.takeLastAuthError() ?? "无法开始扫描。"

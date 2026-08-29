@@ -25,7 +25,6 @@ struct ScanControlBar: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(appState.isAuthenticating)
 
             case .scanning:
                 Button(action: onPause) {
@@ -53,20 +52,6 @@ struct ScanControlBar: View {
 
             Divider().frame(height: 22)
 
-            // 扫描模式：演示（模拟数据）/ 真实（特权 helper 只读扫描）
-            Picker("扫描模式", selection: Binding(
-                get: { appState.useRealScan },
-                set: { appState.useRealScan = $0; appState.refreshHelperStatus() }
-            )) {
-                Text("演示").tag(false)
-                Text("真实").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 110)
-            .disabled(state == .scanning || state == .paused)
-
-            Divider().frame(height: 22)
-
             // 块大小
             LabeledContent {
                 Picker("块大小", selection: $blockSizeKB) {
@@ -87,11 +72,9 @@ struct ScanControlBar: View {
 
             Spacer()
 
-            // 状态标签 + 特权助手提示 + 认证提示
+            // 状态标签 + 特权助手提示 + 扫描错误提示
             HStack(spacing: 8) {
-                if appState.useRealScan {
-                    helperStatusView
-                }
+                helperStatusView
                 if let err = appState.authError {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
@@ -111,6 +94,11 @@ struct ScanControlBar: View {
         case .enabled:
             Label("特权助手已就绪", systemImage: "checkmark.shield.fill")
                 .font(.caption).foregroundStyle(.green)
+            // 已注册 ≠ 能跑：重新打包后旧注册会让 launchd 反复 spawn 失败，
+            // 常驻一个"重装"入口以便一键修复
+            Button("重装") { appState.reinstallHelper() }
+                .font(.caption).controlSize(.small)
+                .help("扫描报「特权助手未确认启动」时点这里重新注册")
         case .requiresApproval:
             Button("去系统设置批准特权助手") {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
