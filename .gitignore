@@ -1,0 +1,8 @@
+# 构建缓存（543MB+，随时可重建：swift build 或 ./make_app.sh）
+.build/
+
+# 打包产物（可重新生成：./make_app.sh）
+dist/
+
+# macOS 杂项
+.DS_Store
