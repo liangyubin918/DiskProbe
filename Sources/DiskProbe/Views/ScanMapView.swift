@@ -174,8 +174,9 @@ struct ScanMapView: View {
             guard zoom > 1, let view = scrollRegion.view, view.window != nil else { return event }
             let local = view.convert(event.locationInWindow, from: nil)
             guard view.bounds.contains(local) else { return event }
-            // 触控板二指滑动映射为"抓取内容"：手指向哪，地图向哪
-            offset = CGSize(width: offset.width - event.scrollingDeltaX,
+            // 触控板二指滑动：纵向按"抓取内容"方向（手指向哪地图向哪），
+            // 横向按标准滚动方向（右滑内容左移，左滑内容右移）
+            offset = CGSize(width: offset.width + event.scrollingDeltaX,
                             height: offset.height + event.scrollingDeltaY)
             clampOffset(size: canvasSize)
             dragBase = offset
