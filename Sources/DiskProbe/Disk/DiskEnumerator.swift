@@ -43,6 +43,8 @@ enum DiskEnumerator {
             // 关键过滤：只过滤明确的"虚拟"盘（APFS 合成容器 / 磁盘镜像 / 虚拟卷）。
             // "Physical" 和 "Unknown"（内置盘常见）都保留。
             guard detail.virtualOrPhysical != .virtual else { continue }
+            // diskutil 失败时返回空 detail，容量为 0 的盘没有扫描意义，直接跳过
+            guard detail.sizeBytes > 0 else { continue }
 
             results.append(DiskInfo(
                 id: bsdName,

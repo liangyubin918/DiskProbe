@@ -49,9 +49,13 @@ actor SMARTReader {
         }
 
         // smartctl -j -a /dev/diskX  — 全部信息，JSON 格式
-        let output = runProcess(smartctl, args: ["-j", "-a", device])
+        let (output, exitStatus) = runProcess(smartctl, args: ["-j", "-a", device])
         guard let data = output.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // 退出码 bit1(2) = 设备打开失败（权限/设备消失），此时不会有有效 JSON
+            if exitStatus & 0x02 != 0 {
+                return .failure(.unknown("无法打开 \(device)（设备不存在或需要更高权限）。"))
+            }
             return .failure(.parseFailed)
         }
 
@@ -83,6 +87,12 @@ actor SMARTReader {
             } else {
                 info.health = "FAILED"
             }
+        }
+        // smartctl 退出码是位掩码而非简单的成败标志：bit3(8) = SMART 状态检查
+        // 返回 FAILED。坏盘恰恰会以非 0 退出码输出合法 JSON，所以 JSON 解析
+        // 不能依赖退出码，但退出码可以用来兜底强制 FAILED。
+        if exitStatus & 0x08 != 0 {
+            info.health = "FAILED"
         }
 
         // ATA 属性表
@@ -130,11 +140,6 @@ actor SMARTReader {
             }
         }
 
-        // 型号回退：ATA 的 model 字段在 device 里也可能
-        if info.model == nil, let dev = json["device"] as? [String: Any] {
-            info.model = dev["name"] as? String
-        }
-
         return .success(info)
     }
 
@@ -142,7 +147,7 @@ actor SMARTReader {
 
     /// 从 raw.string 前缀解析整数：取字符串开头连续数字。
     /// "2263 (168 229 0)" → 2263；"34 (Min/Max 28/36)" → 34；"0" → 0；"" → nil
-    private static func parseInt(_ s: String) -> Int? {
+    static func parseInt(_ s: String) -> Int? {
         let digits = s.prefix { $0.isNumber }
         guard !digits.isEmpty else { return nil }
         return Int(digits)
@@ -159,10 +164,13 @@ actor SMARTReader {
             if FileManager.default.isExecutableFile(atPath: p) { return p }
         }
         // 最后尝试 PATH
-        return nil
+        let (output, _) = runProcess("/usr/bin/which", args: ["smartctl"])
+        let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 
-    private static func runProcess(_ path: String, args: [String]) -> String {
+    /// 返回 stdout 与退出码。退出码交给调用方解释（smartctl 的退出码是位掩码）。
+    private static func runProcess(_ path: String, args: [String]) -> (String, Int32) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
@@ -175,9 +183,9 @@ actor SMARTReader {
             // 缓冲区后父子进程相互等待。
             let data = out.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
-            return p.terminationStatus == 0 ? (String(data: data, encoding: .utf8) ?? "") : ""
+            return (String(data: data, encoding: .utf8) ?? "", p.terminationStatus)
         } catch {
-            return ""
+            return ("", -1)
         }
     }
 }

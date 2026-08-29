@@ -7,7 +7,7 @@ import Foundation
 public struct DiskInfo: Identifiable, Hashable, Sendable {
     public let id: String        // 用 BSD name（"disk4"）做唯一 id
     public let bsdName: String   // "disk4" -> 设备 /dev/disk4、裸设备 /dev/rdisk4
-    public let displayName: String // "Westen Digital"
+    public let displayName: String // 例如 "WD Elements 25A3"
     public let sizeBytes: Int64
     public let deviceProtocol: String? // "USB" / "SATA" / "PCI"（来自 DiskArbitration）
     public let isInternal: Bool        // 系统盘 = true

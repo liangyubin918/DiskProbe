@@ -47,25 +47,26 @@ actor ScanEngine {
         return lastAuthError
     }
 
-    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, useReal: Bool = false) {
-        guard state == .idle || state == .finished || state == .stopped || state == .error else { return }
+    /// 开始演示扫描。返回 false 表示未能启动，原因见 takeLastAuthError()。
+    @discardableResult
+    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, useReal: Bool = false) -> Bool {
+        guard state == .idle || state == .finished || state == .stopped || state == .error else {
+            lastAuthError = "扫描正在进行中，请先停止当前扫描。"
+            return false
+        }
         guard disk.sizeBytes > 0, blockSize > 0 else {
             state = .error
-            return
+            lastAuthError = "磁盘容量或块大小无效。"
+            return false
         }
         guard !useReal else {
             state = .error
             lastAuthError = "真实裸设备读取未启用。"
-            return
+            return false
         }
 
         let quotient = disk.sizeBytes / blockSize
         let remainder = disk.sizeBytes % blockSize
-        guard quotient <= Int64(Int.max) else {
-            state = .error
-            lastAuthError = "磁盘容量超出当前版本可处理的范围。"
-            return
-        }
 
         self.diskSize = disk.sizeBytes
         self.blockSize = blockSize
@@ -85,6 +86,7 @@ actor ScanEngine {
         task = Task { [weak self] in
             await self?.runMockScan(disk: disk, runID: runID, scanStart: Date())
         }
+        return true
     }
 
     func pause() {
@@ -121,6 +123,9 @@ actor ScanEngine {
 
     private func runMockScan(disk: DiskInfo, runID: UUID, scanStart: Date) async {
         var scanned = 0
+        // 暂停时长不计入 elapsed，否则 ETA 会被暂停时间永久推高
+        var pausedTotal: TimeInterval = 0
+        var pauseBegan: Date? = nil
         for i in 0..<totalBlocks {
             guard isCurrent(runID) else { return }
             if Task.isCancelled || stopRequested {
@@ -128,12 +133,17 @@ actor ScanEngine {
                 return
             }
             while pauseRequested {
+                if pauseBegan == nil { pauseBegan = Date() }
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard isCurrent(runID) else { return }
                 if Task.isCancelled || stopRequested {
                     finish(runID: runID, state: .stopped)
                     return
                 }
+            }
+            if let began = pauseBegan {
+                pausedTotal += Date().timeIntervalSince(began)
+                pauseBegan = nil
             }
 
             let (offset, overflow) = Int64(i).multipliedReportingOverflow(by: blockSize)
@@ -161,7 +171,7 @@ actor ScanEngine {
                 errnoValue: failed ? 5 : nil
             )
             scanned += 1
-            let elapsed = Date().timeIntervalSince(scanStart)
+            let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
             let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
             let remaining = max(0, totalBlocks - scanned)
             let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
@@ -197,7 +207,10 @@ actor ScanEngine {
 
     private func updateSpeed(elapsed: TimeInterval, scanned: Int) -> Double {
         speedSamples.append((elapsed, scanned))
-        speedSamples.removeAll { elapsed - $0.elapsed > 8.0 }
+        // 样本按 elapsed 有序，从队首逐个剔除过期样本即可
+        while let first = speedSamples.first, elapsed - first.elapsed > 8.0 {
+            speedSamples.removeFirst()
+        }
         guard let first = speedSamples.first, speedSamples.count > 1 else { return 0 }
         let duration = elapsed - first.elapsed
         let blocks = scanned - first.blocksDone

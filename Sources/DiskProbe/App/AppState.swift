@@ -29,6 +29,9 @@ final class AppState: ObservableObject {
     @Published var isAuthenticating = false
     @Published var authError: String? = nil
 
+    // SMART 请求序号（防陈旧结果覆盖）
+    private var smartRequestID = 0
+
     // 扫描地图格子（固定大小，每格代表一组块，增量更新）
     @Published var mapCells: [BlockStatus] = []
     @Published var mapCellCount: Int = 0
@@ -44,6 +47,9 @@ final class AppState: ObservableObject {
     let mapRows = 60
     private var cellsPerBlockGroup: Int = 1
 
+    // 进度监听任务（保证任意时刻只有一个消费者，避免事件被瓜分）
+    private var listenerTask: Task<Void, Never>? = nil
+
     let engine = ScanEngine()
 
     init() {
@@ -56,7 +62,10 @@ final class AppState: ObservableObject {
         enumerateError = nil
         let result = await Task.detached(priority: .userInitiated) { DiskEnumerator.enumerate() }.value
         disks = result
-        if selectedDisk == nil {
+        // 选中盘可能已被拔掉：只有在结果里仍存在时才保留，否则回退到默认选择
+        if let current = selectedDisk, result.contains(current) {
+            // 保留当前选择
+        } else {
             selectedDisk = result.first(where: { $0.isExternalPhysical }) ?? result.first
         }
         isEnumerating = false
@@ -67,8 +76,12 @@ final class AppState: ObservableObject {
         guard let disk = selectedDisk else {
             smartInfo = nil
             smartError = nil
+            isReadingSMART = false
             return
         }
+        // 请求序号：切换磁盘后，旧请求的慢结果不允许覆盖新盘的数据
+        smartRequestID += 1
+        let requestID = smartRequestID
         isReadingSMART = true
         smartError = nil
 
@@ -76,15 +89,16 @@ final class AppState: ObservableObject {
             await SMARTReader.read(bsdName: disk.bsdName)
         }.value
 
+        guard requestID == smartRequestID, disk.id == selectedDisk?.id else { return }
+        isReadingSMART = false
         switch result {
         case .success(let info):
             smartInfo = info
             smartError = nil
         case .failure(let err):
-            smartInfo = nil
+            // 保留上一次成功的数据，瞬时失败不至于闪空
             smartError = err.localizedDescription
         }
-        isReadingSMART = false
     }
 
     // MARK: 扫描控制
@@ -98,7 +112,9 @@ final class AppState: ObservableObject {
         // 初始化地图
         mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
 
-        Task {
+        // 取消旧监听，保证进度流始终只有一个消费者
+        listenerTask?.cancel()
+        listenerTask = Task {
             if useRealScan {
                 isAuthenticating = true
                 let ok = await engine.authenticate(disk: d, blockSize: Int64(blockSizeKB) * 1024)
@@ -108,7 +124,12 @@ final class AppState: ObservableObject {
                     return
                 }
             }
-            await engine.start(disk: d, blockSize: Int64(blockSizeKB) * 1024, useReal: useRealScan)
+            let started = await engine.start(disk: d, blockSize: Int64(blockSizeKB) * 1024, useReal: useRealScan)
+            guard started else {
+                authError = await engine.takeLastAuthError() ?? "无法开始扫描。"
+                await syncState()
+                return
+            }
             await listenProgress()
         }
     }
@@ -139,9 +160,12 @@ final class AppState: ObservableObject {
 
     private func updateMap(_ p: ScanProgress) {
         if mapCells.count == mapColumns * mapRows && p.totalBlocks > 0 {
-            cellsPerBlockGroup = max(1, p.totalBlocks / (mapColumns * mapRows))
+            // 向上取整：保证 cellsPerBlockGroup 不会超过格子总数。
+            // 旧版用向下取整，磁盘 > ~4.7TB（128KB 块）时 group > 6000，
+            // 下面这个 guard 永远失败，地图和统计会完全冻结。
+            cellsPerBlockGroup = max(1, (p.totalBlocks + mapCells.count - 1) / mapCells.count)
         }
-        guard cellsPerBlockGroup > 0, cellsPerBlockGroup <= mapCells.count else { return }
+        guard cellsPerBlockGroup > 0 else { return }
 
         let cellIndex = min(mapCells.count - 1, p.currentIndex / cellsPerBlockGroup)
         let status = p.lastBlock.status
@@ -158,7 +182,6 @@ final class AppState: ObservableObject {
         if severity(status) > severity(mapCells[cellIndex]) {
             mapCells[cellIndex] = status
         }
-        mapCellCount = min(mapCells.count, p.currentIndex / cellsPerBlockGroup + 1)
     }
 
     private func severity(_ s: BlockStatus) -> Int {
@@ -179,7 +202,7 @@ final class AppState: ObservableObject {
     }
 
     private func syncState() async {
-        let s = await engine.state
-        Task { @MainActor in self.scanState = s }
+        // AppState 已在 MainActor，await 回来后直接赋值即可
+        scanState = await engine.state
     }
 }
