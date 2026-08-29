@@ -363,7 +363,12 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
 struct HelperMain {
     static func main() {
         NSLog("[DiskProbeHelper] helper launched (pid %d)", getpid())
-        let listener = NSXPCListener.service()
+        // 注意：不要用 NSXPCListener.service()！它走 xpc_main 的"XPC Service"
+        // check-in 路径，与 launchd daemon（MachServices）环境不匹配，
+        // 会在 _xpc_copy_xpcservice_dictionary 处 SIGTRAP 崩溃（实测 macOS 26.4）。
+        // daemon 必须用显式 mach 服务名：launchd 按 plist 里的 MachServices 建好
+        // socket，这里用 LISTENER 模式认领。
+        let listener = NSXPCListener(machServiceName: HelperIdentifiers.machServiceName)
         let delegate = HelperDelegate()
         listener.delegate = delegate
         listener.resume()

@@ -92,6 +92,22 @@ final class AppState: ObservableObject {
     init() {
         Task { await refreshDisks() }
         helperStatus = helperService.status
+        // 无头模式：`open DiskProbe.app --args --register-helper` 注册完自动退出，
+        // 用于脚本化安装/诊断（与点击"安装特权助手"完全同一条代码路径）
+        if CommandLine.arguments.contains("--register-helper") {
+            headlessRegister()
+        }
+    }
+
+    private func headlessRegister() {
+        Task {
+            runHelperOperation(reinstall: true)
+            while helperOpInProgress {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            exit(0)
+        }
     }
 
     // MARK: 特权助手
