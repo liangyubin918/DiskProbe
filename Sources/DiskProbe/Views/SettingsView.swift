@@ -7,6 +7,14 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var showDonate = false
 
+    // @AppStorage 持久化到 UserDefaults，AppState 启动时读同一组 key
+    @AppStorage("scan.warnMs") private var thresholdWarnMs: Double = 100
+    @AppStorage("scan.abnormalMs") private var thresholdAbnormalMs: Double = 500
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
     var body: some View {
         Form {
             Section("扫描阈值（毫秒）") {
@@ -46,25 +54,26 @@ struct SettingsView: View {
                 }
                 Text("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。")
                     .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text("DiskProbe v\(appVersion)")
+                        .font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
+                    Spacer()
+                }
             }
-        }
-        .sheet(isPresented: $showDonate) {
-            DonateSheet()
         }
         .formStyle(.grouped)
         .padding(20)
         .frame(width: 420)
         .navigationTitle("DiskProbe 设置")
+        .sheet(isPresented: $showDonate) {
+            DonateSheet()
+        }
         .onAppear {
             // 打开窗口时与当前生效阈值同步（阈值已通过 UserDefaults 持久化）
             thresholdWarnMs = appState.thresholds.warnMs
             thresholdAbnormalMs = appState.thresholds.abnormalMs
         }
     }
-
-    // @AppStorage 持久化到 UserDefaults，AppState 启动时读同一组 key
-    @AppStorage("scan.warnMs") private var thresholdWarnMs: Double = 100
-    @AppStorage("scan.abnormalMs") private var thresholdAbnormalMs: Double = 500
 
     private func commit() {
         // 保证 warn < abnormal
