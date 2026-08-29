@@ -20,6 +20,7 @@ struct ScanMapView: View {
     @State private var magBase: CGFloat = 1
     @State private var dragBase: CGSize = .zero
     @State private var hover: (index: Int, point: CGPoint)? = nil
+    @State private var lastCursor: CGPoint? = nil   // 最后光标位置（画布局部坐标）
     @State private var canvasSize: CGSize = .zero
 
     // 二指滚动平移：透明 NSView 仅用于标定地图区域的窗口坐标；
@@ -126,6 +127,7 @@ struct ScanMapView: View {
                 offset = CGSize(width: dragBase.width + v.translation.width,
                                 height: dragBase.height + v.translation.height)
                 clampOffset(size: size)
+                refreshHover()
             }
             .onEnded { _ in dragBase = offset }
     }
@@ -135,6 +137,7 @@ struct ScanMapView: View {
             .onChanged { v in
                 zoom = min(Self.maxZoom, max(1, magBase * v))
                 clampOffset(size: size)
+                refreshHover()
             }
             .onEnded { _ in magBase = zoom }
     }
@@ -144,6 +147,7 @@ struct ScanMapView: View {
         zoom = min(Self.maxZoom, max(1, zoom * (direction > 0 ? 2 : 0.5)))
         clampOffset(size: size)
         magBase = zoom
+        refreshHover()
     }
 
     private func resetView(size: CGSize) {
@@ -151,6 +155,7 @@ struct ScanMapView: View {
         magBase = 1
         offset = .zero
         dragBase = .zero
+        refreshHover()
     }
 
     // MARK: 二指滑动 / 滚轮平移
@@ -180,6 +185,7 @@ struct ScanMapView: View {
                             height: offset.height + event.scrollingDeltaY)
             clampOffset(size: canvasSize)
             dragBase = offset
+            refreshHover()
             return nil
         }
     }
@@ -193,7 +199,15 @@ struct ScanMapView: View {
 
     // MARK: 悬停
 
+    /// 平移/缩放后地图在光标下滑动，用最后光标位置重算悬停格，
+    /// 保证移动过程中与停止后 tooltip 都实时更新
+    private func refreshHover() {
+        guard let p = lastCursor, canvasSize != .zero else { return }
+        updateHover(at: p, size: canvasSize)
+    }
+
     private func updateHover(at p: CGPoint, size: CGSize) {
+        lastCursor = p
         let cols = appState.mapColumns
         let total = appState.mapCells.count
         guard total > 0, cols > 0 else { hover = nil; return }
