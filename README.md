@@ -1,67 +1,79 @@
 # DiskProbe — macOS 硬盘坏道检测工具
 
-macOS 原生硬盘检测工具（类似 DiskGenius 坏道检测），Swift + SwiftUI，Apple Silicon 原生。
-当前版本（2.1）为**真实只读坏道扫描**：SMAppService 特权 XPC helper 直接读取盘面。
+**English**: A native macOS bad-sector scanner with a DiskGenius-style defect map, built with Swift/SwiftUI and a sandboxed-approval privileged helper. Strictly read-only — it never writes to your disk.
 
-## 使用（推荐：.app 双击启动）
+<!-- TODO: 应用截图（Cmd+Shift+4 截取窗口，保存为 docs/screenshot.png 后取消注释下一行）
+![DiskProbe 主界面](docs/screenshot.png)
+-->
 
-```bash
-cd ~/.zcode/workspace/default/DiskProbe
-./make_app.sh            # 一键打包 → dist/DiskProbe.app（优先 Apple Development 签名）
-open dist/DiskProbe.app  # 双击启动
-```
+## 这是什么
 
-- 首次使用：点「安装特权助手」→ 选盘 → 开始扫描（只读，不改数据）。
-- **首次扫描若提示被隐私保护拦截**：在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 DiskProbe（macOS 要求，root 也不豁免），app 内的「去授权」按钮可直达。
-- **扫描报「特权助手未确认启动」**：说明注册信息过期（重新打包后常见），
-  点控制条右侧的「重装」按钮重新注册即可。
-- 必须从 .app bundle 启动（SMAppService 要求），`swift run` 模式下会明确报错。
-- 打包脚本找不到 Apple Development 身份时无法使用（SMAppService 拒绝 ad-hoc daemon）。
-- 如果 macOS 提示"无法打开"，先执行：
-  ```bash
-  xattr -dr com.apple.quarantine dist/DiskProbe.app
-  ```
-
-## 开发调试
-
-```bash
-swift build                    # 编译 app + DiskProbeHelper
-swift run DiskProbe            # 运行 GUI app（仅演示扫描可用）
-# 单元测试需要完整 Xcode 工具链（Command Line Tools 不带 XCTest/Testing 框架）：
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
-```
-
-## 功能
+DiskProbe 是一款 macOS 原生硬盘坏道检测工具（对标 DiskGenius 的坏道检测）。它把整块硬盘按块顺序**只读**读取一遍，按每块的读取耗时给磁盘表面"体检"，并用一张 100×60 的色块地图把结果可视化：绿=正常、黄=慢速、红=异常、深红=坏道。
 
 | 功能 | 说明 |
 |---|---|
-| 磁盘列表 | 只显示**物理盘**（过滤 APFS 容器/磁盘镜像/虚拟盘），外置盘排前，标注系统盘/外置盘 |
-| 扫描 | **真实只读扫描**（特权 helper 读裸设备，F_NOCACHE 绕过页缓存），耗时分类：正常/慢速/异常/坏道 |
-| 扫描地图 | 100×60 色块网格，引擎产出完整快照，实时进度/速度/ETA |
-| 扫描控制 | 开始/暂停/继续/停止，阈值可调（Cmd+,，UserDefaults 持久化） |
-| SMART | smartctl 读取：温度/通电时间/健康/重映射扇区(HDD)/寿命(SSD)，不支持时明确提示 |
+| 磁盘列表 | 只显示物理盘（过滤 APFS 容器/磁盘镜像/虚拟盘），外置盘排前，标注系统盘/外置盘 |
+| 真实只读扫描 | 特权 helper 直接读裸设备（`F_NOCACHE` 绕过页缓存），速度/进度/坏道均为真实数据 |
+| 扫描地图 | 100×60 色块网格，悬停查看格子编号/块编号/采样耗时，支持缩放（1×–16×）与平移 |
+| 可疑块复检 | 单次读 ≥50ms 或失败的块自动重读最多 3 次取最优，坏块需连续失败才定论 |
+| 扫描控制 | 开始/暂停/继续/停止，阈值可调（Cmd+,）并持久化 |
+| SMART | smartctl 读取：健康/温度/通电时间/重映射扇区(HDD)/寿命(SSD) |
+| 记录导出 | 扫描完成后导出 CSV（表格分析）或 JSON（完整报告，含地图快照） |
 
-## 安全设计（特权 helper）
+## 系统要求
 
-- helper 以 root 权限 launchd daemon 运行（SMAppService 安装），**只读**：接口层没有任何写语义。
-- 调用方校验：audit token → SecCode → 校验 identifier 为 `local.diskprobe` 且与 helper 同一签名团队；ad-hoc 直接拒绝。
-- 设备白名单 `^/dev/rdisk[0-9]+$`（整盘裸设备），lstat 拒绝符号链接，stat 必须是字符设备。
-- `O_RDONLY` 打开 + F_NOCACHE；app 断开连接时 helper 自动停止扫描。
-- 旧版 `AuthorizationExecuteWithPrivileges` + bundle 内 helper 的提权方案**已废弃，不要再引入**。
+- macOS 14 及以上，Apple Silicon 原生
+- 钥匙串中有效的 **Apple Development 签名证书**（特权助手必须真实签名，SMAppService 拒绝 ad-hoc）
+- `smartctl`（`brew install smartmontools`，仅 SMART 功能需要，没有也能扫描）
+- **完全磁盘访问权限**：macOS 隐私保护要求读取裸设备必须授权，root 也不豁免；首次扫描按提示在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加本 app 即可
 
-## 目录结构
+## 构建与运行
 
-```
-Sources/DiskProbeCore/    共享模型（DiskInfo / BlockStatus / 阈值 / XPC 协议 / BatchCodec）
-Sources/DiskProbe/        SwiftUI app（枚举 / 扫描引擎 / RealScanSession / SMART / 视图）
-Sources/DiskProbeHelper/  特权 helper（root daemon：ScanRunner + 客户端身份校验）
-Tests/DiskProbeTests/     Swift Testing 单元测试（19 个）
-make_app.sh               打包脚本（.app + helper 双签名 + LaunchDaemons plist）
-HANDOFF.md                架构与开发进度记录
-REMIND.md                 下次继续工作的注意事项（先读这个）
+```bash
+git clone https://github.com/<you>/DiskProbe.git
+cd DiskProbe
+./make_app.sh                 # 编译 app + 特权 helper，打包并签名 → dist/DiskProbe.app
+open dist/DiskProbe.app       # 双击启动
 ```
 
-## 依赖
+首次使用：点「安装特权助手」→ 选盘 → 开始扫描（全程只读，不修改任何数据）。
 
-- `smartctl`（brew install smartmontools）用于 SMART 信息；没有也能扫描
-- 真实扫描需要钥匙串里有效的 Apple Development 签名身份，并从 .app 启动
+开发调试：
+
+```bash
+swift build                   # 编译（仅演示用途；真实扫描必须从 .app 启动）
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test   # 单元测试（27 个）
+```
+
+## 工作原理
+
+```
+DiskProbe.app（用户权限，SwiftUI）
+  ├─ DiskEnumerator      IOKit + diskutil 枚举物理整盘
+  ├─ SMARTReader         smartctl -j -a 解析 SMART
+  └─ ScanEngine (actor)  消费扫描批次 → 分类/统计/地图快照/速度/ETA
+
+        ▲ XPC（audit token 校验调用方身份）
+        ▼
+
+DiskProbeHelper（root 权限 launchd daemon，SMAppService 安装）
+  └─ 逐块 pread 计时（O_RDONLY + F_NOCACHE），批次回传约 20 字节/块
+```
+
+检测方法与 DiskGenius 等工具一致：顺序只读扫描，按单块读取耗时分级（<100ms 正常，100–500ms 警告，≥500ms 异常，读取失败为坏道）。只读不写，任何情况下不会修改磁盘数据。
+
+## 安全设计
+
+特权 helper 以 root 运行，安全是第一约束：
+
+- 调用方校验：audit token → SecCode → 校验 identifier 与签名团队，未签名/异签名进程一律拒绝
+- 设备白名单 `^/dev/rdisk[0-9]+$`，lstat 拒绝符号链接，stat 必须为字符设备
+- 设备以 `O_RDONLY` 打开，XPC 接口层不存在任何写语义
+- app 断开连接时 helper 自动停止扫描；空闲 60 秒自动退出
+- 旧版 `AuthorizationExecuteWithPrivileges` 提权方案存在本地提权漏洞，已彻底废弃
+
+踩坑记录（SMAppService daemon 的 `NSXPCListener.service()` 崩溃、KVC auditToken 强转陷阱、TCC 授权等）见 [REMIND.md](REMIND.md)，完整架构与开发背景见 [HANDOFF.md](HANDOFF.md)。
+
+## License
+
+[MIT](LICENSE)
