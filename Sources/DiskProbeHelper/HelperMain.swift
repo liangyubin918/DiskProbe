@@ -107,6 +107,12 @@ final class ScanRunner: NSObject, HelperScanProtocol {
 
     // MARK: 扫描主循环（独立队列）
 
+    /// 复检阈值：单次读 ≥ 此值的块视为可疑，最多再读 2 次取最优。
+    /// 远低于 app 默认警告阈值（100ms），健康盘（HDD ~20ms）的块永不复检，零开销。
+    /// 目的：剔除系统 IO 抖动造成的"假慢块/假坏块"，让同一块盘多次扫描结果稳定。
+    static let verifyThresholdMs: Double = 50
+    static let maxAttempts = 3
+
     private func runLoop(fd scanFD: Int32, blockSize: Int) {
         lock.lock()
         let connection = self.connection
@@ -147,36 +153,71 @@ final class ScanRunner: NSObject, HelperScanProtocol {
             }
             guard !stop else { break }
 
-            var done: Int = 0
-            var readErrno: Int32 = 0
-            var eof = false
-            let started = DispatchTime.now().uptimeNanoseconds
-            while done < blockSize {
-                let n = pread(scanFD, buffer.advanced(by: done), blockSize - done, offset + Int64(done))
-                if n < 0 {
-                    if errno == EINTR { continue }
-                    readErrno = Int32(errno)
+            // 逐块读取（可疑块复检，取最好成绩）
+            var bestElapsed: Double? = nil
+            var lastErrno: Int32 = 0
+            var lastElapsed: Double = 0
+            var endOfDisk = false
+
+            for attempt in 0..<Self.maxAttempts {
+                var done: Int = 0
+                var readErrno: Int32 = 0
+                var eof = false
+                let started = DispatchTime.now().uptimeNanoseconds
+                while done < blockSize {
+                    let n = pread(scanFD, buffer.advanced(by: done), blockSize - done, offset + Int64(done))
+                    if n < 0 {
+                        if errno == EINTR { continue }
+                        readErrno = Int32(errno)
+                        break
+                    }
+                    if n == 0 { eof = true; break }  // 到达盘末
+                    done += n
+                }
+                lastElapsed = elapsedMsSince(started)
+
+                if eof {
+                    // 盘末：done==0 表示恰好读完；done>0 是最后一块（不足 blockSize）
+                    endOfDisk = true
+                    if done > 0 {
+                        if readErrno == 0 {
+                            bestElapsed = lastElapsed
+                            lastErrno = 0
+                        } else {
+                            lastErrno = readErrno
+                        }
+                    } else if readErrno != 0 {
+                        lastErrno = readErrno
+                    }
                     break
                 }
-                if n == 0 { eof = true; break }  // 到达盘末
-                done += n
-            }
-            let elapsed = elapsedMsSince(started)
-
-            var endOfDisk = false
-            if readErrno != 0 {
-                // 读取失败（EIO=5 即坏道）：记 errno，继续下一块——坏道是数据不是终点
-                errnos.append(readErrno)
-                elapsedMs.append(elapsed)
-            } else if eof && done == 0 {
-                endOfDisk = true
-            } else {
-                errnos.append(0)
-                elapsedMs.append(elapsed)
-                if eof { endOfDisk = true }
+                if readErrno != 0 {
+                    // 读取失败：复检确认，连续失败才算坏块（EIO=5 即坏道）
+                    lastErrno = readErrno
+                    continue
+                }
+                if bestElapsed == nil || lastElapsed < bestElapsed! {
+                    bestElapsed = lastElapsed
+                }
+                // 快块一次定论；慢块复检剔除抖动
+                if bestElapsed! < Self.verifyThresholdMs || attempt == Self.maxAttempts - 1 {
+                    break
+                }
             }
 
-            offsets.append(offset)
+            // eof 且无任何数据：不记录该块，直接结束
+            let recordBlock = !(endOfDisk && bestElapsed == nil && lastErrno == 0)
+            if recordBlock {
+                if let e = bestElapsed, lastErrno == 0 {
+                    errnos.append(0)
+                    elapsedMs.append(e)
+                } else {
+                    // 读取失败（EIO=5 即坏道）：记 errno，继续下一块——坏道是数据不是终点
+                    errnos.append(lastErrno)
+                    elapsedMs.append(lastElapsed)
+                }
+                offsets.append(offset)
+            }
             offset += Int64(blockSize)
             flush(force: false)
             if endOfDisk { break }

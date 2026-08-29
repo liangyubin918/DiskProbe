@@ -22,6 +22,20 @@ struct SettingsView: View {
                 Text("读取耗时 ≥ 警告阈值标记为黄色；≥ 异常阈值标记为红色；读取失败标记为错误。")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("特权助手") {
+                LabeledContent("状态") {
+                    switch appState.helperStatus {
+                    case .enabled: Text("已注册").foregroundStyle(.green)
+                    case .requiresApproval: Text("待系统设置批准").foregroundStyle(.orange)
+                    case .notRegistered: Text("未安装")
+                    case .notFound: Text("未找到（请从 .app 启动）")
+                    @unknown default: Text("未知")
+                    }
+                }
+                Button("重装特权助手（疑难修复）") { appState.reinstallHelper() }
+                Text("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding(20)

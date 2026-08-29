@@ -60,7 +60,9 @@ struct ScanMapView: View {
         } else {
             HStack {
                 Image(systemName: "rectangle.grid.3x3")
-                Text(appState.scanState == .idle ? "点击「开始扫描」开始检测" : "准备中…")
+                let idleLike = appState.scanState == .idle || appState.scanState == .stopped
+                    || appState.scanState == .error || appState.scanState == .finished
+                Text(idleLike ? "点击「开始扫描」开始检测" : "准备中…")
                     .foregroundStyle(.secondary)
                 Spacer()
             }

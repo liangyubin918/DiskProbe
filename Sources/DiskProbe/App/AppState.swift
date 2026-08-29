@@ -19,7 +19,18 @@ enum HelperHealth: Equatable {
 @MainActor
 final class AppState: ObservableObject {
     @Published var disks: [DiskInfo] = []
-    @Published var selectedDisk: DiskInfo? = nil
+    @Published var selectedDisk: DiskInfo? = nil {
+        didSet {
+            // 切到另一块盘：清空上一块盘残留的进度/地图/统计；
+            // 若上一块盘的扫描还在跑，先自动停止（扫描面板始终只反映当前选中盘）
+            guard selectedDisk?.id != displayedScanDiskID else { return }
+            if scanState == .scanning || scanState == .paused {
+                stopScan()
+            } else {
+                resetScanDisplay()
+            }
+        }
+    }
     @Published var isEnumerating = false
     @Published var enumerateError: String? = nil
 
@@ -296,8 +307,12 @@ final class AppState: ObservableObject {
 
     // MARK: 扫描控制
 
+    /// 当前显示的扫描结果属于哪块盘（nil = 无结果）。切到其他盘时用于清空残留显示。
+    private var displayedScanDiskID: String? = nil
+
     func startScan(blockSizeKB: Int = 128) {
         guard let d = selectedDisk else { return }
+        displayedScanDiskID = d.id
         progress = nil
         authError = nil
         helperOpError = nil
@@ -336,10 +351,22 @@ final class AppState: ObservableObject {
         Task { await engine.resume(); await syncState() }
     }
     func stopScan() {
+        // 停止 = 本次扫描作废：立即清空进度/地图/统计，不再显示停止前的残留
+        listenerTask?.cancel()
+        listenerTask = nil
+        resetScanDisplay()
         Task {
             await engine.stop()
             await syncState()
         }
+    }
+
+    /// 清空扫描显示，并解除"结果属于某块盘"的绑定
+    private func resetScanDisplay() {
+        displayedScanDiskID = nil
+        progress = nil
+        mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
+        resetStats()
     }
 
     private func listenProgress() async {

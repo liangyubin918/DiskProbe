@@ -128,12 +128,9 @@ struct ScanControlBar: View {
     @ViewBuilder private var helperHealthView: some View {
         switch appState.helperHealth {
         case .ready:
+            // 就绪态保持干净，不放操作按钮；需要重装的异常态由下面的分支接管
             Label("特权助手已就绪", systemImage: "checkmark.shield.fill")
                 .font(.caption).foregroundStyle(.green)
-            // 常驻"重装"入口：重新打包后旧注册会让 launchd spawn 失败，一键修复
-            Button("重装") { appState.reinstallHelper() }
-                .font(.caption).controlSize(.small)
-                .help("扫描报「特权助手未确认启动」时点这里重新注册")
         case .stale(let reported):
             Label("助手版本过期（注册的是 \(reported)）", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
                 .font(.caption).foregroundStyle(.orange)
