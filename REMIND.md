@@ -14,6 +14,10 @@
 2. root 进程崩溃读 /Library/Logs/DiagnosticReports/*.ips 的崩溃栈；
 3. `--register-helper` 无头模式 + `launchctl print system/local.diskprobe.helper`。
 另：SMAppService 对同签名 daemon 重复 register/unregister **不弹密码框**，属正常。
+第二个坑（同日）：KVC 取 auditToken 后 `as? audit_token_t` **运行时恒为 nil**，
+会把包括合法 app 在内的所有客户端拒之门外。C 结构体必须用
+`boxed.getValue(&token)` 拷字节。已给 verifyClient 每个失败分支加 NSLog，
+原因看 /tmp/diskprobe-helper.err 即可。
 
 ## ✅ 2026-08-29 对抗式审查发现的问题——已全部修复
 
