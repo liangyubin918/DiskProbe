@@ -54,6 +54,11 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         }
         let newFD = open(devicePath, O_RDONLY)
         guard newFD >= 0 else {
+            // root 也会被 TCC 拦：读取裸设备需要完全磁盘访问权限（Full Disk Access）
+            if errno == EPERM {
+                reply("[TCC] macOS 隐私保护拦截了裸设备读取。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 DiskProbe（App），然后重新扫描。若仍失败，把 helper 二进制（DiskProbe.app/Contents/Library/LaunchServices/DiskProbeHelper）也加入列表。")
+                return
+            }
             reply("无法打开 \(devicePath)：\(String(cString: strerror(errno)))（errno \(errno)）")
             return
         }

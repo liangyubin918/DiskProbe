@@ -36,6 +36,14 @@
 
 修复后：swift build 无警告、19 测试全绿、`./make_app.sh` 重新打包（helper TeamIdentifier 有效）。
 
+## 🔐 TCC：裸设备读取需要完全磁盘访问权限（2026-08-29）
+
+helper 以 root 运行也会被 macOS 隐私保护拦下：open(/dev/rdiskN) 返回
+EPERM(errno 1)。这是 TCC 设计使然（root 不豁免）。解决：系统设置 →
+隐私与安全性 → 完全磁盘访问权限 → 添加 DiskProbe.app；若无效再把
+Contents/Library/LaunchServices/DiskProbeHelper 也加入。helper 对 EPERM
+返回带 [TCC] 前缀的文案，app 端据此显示"去授权"直达按钮。
+
 ## 📌 工作方式提醒
 
 - 跑测试：`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`

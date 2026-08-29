@@ -76,7 +76,17 @@ struct ScanControlBar: View {
             HStack(spacing: 8) {
                 helperStatusView
                 if let err = appState.authError {
-                    Text(err).font(.caption).foregroundStyle(.red)
+                    if err.hasPrefix("[TCC]") {
+                        Button("去授权完全磁盘访问") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .font(.caption).controlSize(.small)
+                        Text(err.dropFirst(5)).font(.caption).foregroundStyle(.red)
+                    } else {
+                        Text(err).font(.caption).foregroundStyle(.red)
+                    }
                 }
                 stateLabel
             }
