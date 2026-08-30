@@ -1,0 +1,26 @@
+# CI：每次推送/PR 自动跑单元测试 + 双架构发布构建验证。
+# macos runner 带完整 Xcode（含 swift-testing 与 xcbuild），本地
+# CommandLineTools 跑不了的 swift test 在这里兜底。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift 版本
+        run: swift --version
+
+      - name: 单元测试
+        run: swift test
+
+      - name: 双架构发布构建（Universal 2）
+        run: swift build -c release --arch arm64 --arch x86_64
