@@ -38,14 +38,14 @@ final class RealScanSession: NSObject, HelperClientProtocol {
             // 必须唤醒挂起的 begin，否则 await 永久挂起、UI 毫无反应。
             guard let self else { return }
             self.resumeAck(false)
-            self.finish(error: "无法连接特权助手（未安装、被系统拒绝或连接已断开）。")
+            self.finish(error: tr("无法连接特权助手（未安装、被系统拒绝或连接已断开）。", "Cannot connect to the privileged helper (not installed, rejected by the system, or disconnected)."))
         }
         connection.resume()
         self.connection = connection
 
         let acked: Bool = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             guard let proxy = connection.remoteObjectProxy as? HelperScanProtocol else {
-                self.finish(error: "特权助手接口不可用。")
+                self.finish(error: tr("特权助手接口不可用。", "The privileged helper interface is unavailable."))
                 cont.resume(returning: false)
                 return
             }
@@ -70,7 +70,7 @@ final class RealScanSession: NSObject, HelperClientProtocol {
             self.ackTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(Self.ackTimeout * 1_000_000_000))
                 guard let self, self.resumeAck(false) else { return }
-                self.finish(error: "特权助手 \(Int(Self.ackTimeout)) 秒内未确认启动（注册信息可能过期，请点「重装特权助手」）。")
+                self.finish(error: tr("特权助手 \(Int(Self.ackTimeout)) 秒内未确认启动（注册信息可能过期，请点「重装特权助手」）。", "The privileged helper did not acknowledge startup within \(Int(Self.ackTimeout)) seconds (its registration may be stale; click Reinstall Privileged Helper)."))
             }
         }
         return acked ? stream : nil

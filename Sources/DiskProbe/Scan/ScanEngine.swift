@@ -70,19 +70,19 @@ actor ScanEngine {
     @discardableResult
     func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000) async -> Bool {
         guard state == .idle || state == .finished || state == .stopped || state == .error else {
-            lastAuthError = "扫描正在进行中，请先停止当前扫描。"
+            lastAuthError = tr("扫描正在进行中，请先停止当前扫描。", "A scan is already running; stop it first.")
             return false
         }
         guard disk.sizeBytes > 0, blockSize > 0 else {
             state = .error
-            lastAuthError = "磁盘容量或块大小无效。"
+            lastAuthError = tr("磁盘容量或块大小无效。", "Invalid disk capacity or block size.")
             return false
         }
 
         let session = RealScanSession()
         guard let batchStream = await session.begin(bsdName: disk.bsdName, blockSize: UInt64(blockSize)) else {
             state = .error
-            lastAuthError = session.lastError ?? "无法连接特权助手。若已安装仍失败，请在 app 内点「重装特权助手」重新注册后重试。"
+            lastAuthError = session.lastError ?? tr("无法连接特权助手。若已安装仍失败，请在 app 内点「重装特权助手」重新注册后重试。", "Cannot reach the privileged helper. If it is installed but still failing, click Reinstall Privileged Helper in the app, then retry.")
             return false
         }
         realSession = session
@@ -256,7 +256,7 @@ actor ScanEngine {
                           scanStart: scanStart, pausedTotal: pausedTotal)
         }
         if let error = realSession?.lastError {
-            lastAuthError = "扫描异常终止：\(error)"
+            lastAuthError = tr("扫描异常终止：\(error)", "Scan terminated abnormally: \(error)")
             finish(runID: runID, state: .error)
         } else {
             scanMeta?.finishedAt = Date()

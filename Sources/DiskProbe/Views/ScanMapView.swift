@@ -91,7 +91,8 @@ struct ScanMapView: View {
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(BlurBackground(cornerRadius: 8))
                     .padding(8)
-                    .help("双指滑动平移，捏合或加减缩放，双击复位")
+                    .help(tr("双指滑动平移，捏合或加减缩放，双击复位",
+                             "Two-finger scroll to pan, pinch or +/- to zoom, double-click to reset"))
                 }
                 .onAppear { installScrollPan() }
                 .onDisappear { removeScrollPan() }
@@ -340,18 +341,18 @@ struct ScanMapView: View {
 
     @ViewBuilder private func hoverTooltip(cell: MapCell, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("格子 #\(index)")
+            Text(tr("格子 #\(index)", "Cell #\(index)"))
                 .font(.caption.monospacedDigit().weight(.bold))
             if cell.blockIndex >= 0 {
-                Text("块 #\(cell.blockIndex)")
+                Text(tr("块 #\(cell.blockIndex)", "Block #\(cell.blockIndex)"))
                     .font(.caption2.monospacedDigit()).foregroundColor(.appSecondary)
                 HStack(spacing: 4) {
                     Circle().fill(statusColor(cell.status)).frame(width: 7, height: 7)
-                    Text("\(String(format: "%.1f", cell.elapsedMs)) ms · \(cell.status.rawValue)")
+                    Text("\(String(format: "%.1f", cell.elapsedMs)) ms · \(cell.status.displayName)")
                         .font(.caption2.monospacedDigit())
                 }
             } else {
-                Text("未扫描").font(.caption2).foregroundColor(.appSecondary)
+                Text(tr("未扫描", "Unscanned")).font(.caption2).foregroundColor(.appSecondary)
             }
         }
         .padding(7)
@@ -367,25 +368,25 @@ struct ScanMapView: View {
         if let p = appState.progress {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("进度").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("进度", "Progress")).font(.caption).foregroundColor(.appSecondary)
                     Text(String(format: "%.2f%%", p.fraction * 100))
                         .font(.title3.monospacedDigit().weight(.bold))
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("速度").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("速度", "Speed")).font(.caption).foregroundColor(.appSecondary)
                     Text(String(format: "%.1f MB/s", p.speedMBps)).font(.callout.monospacedDigit())
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("已用").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("已用", "Elapsed")).font(.caption).foregroundColor(.appSecondary)
                     Text(formatDuration(p.elapsedSeconds)).font(.callout.monospacedDigit())
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("预计剩余").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("预计剩余", "Remaining")).font(.caption).foregroundColor(.appSecondary)
                     Text(formatDuration(p.etaSeconds)).font(.callout.monospacedDigit())
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("当前位置").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("当前位置", "Position")).font(.caption).foregroundColor(.appSecondary)
                     Text(byteOffset(p.lastBlock.startOffset)).font(.caption.monospacedDigit())
                 }
             }
@@ -395,7 +396,8 @@ struct ScanMapView: View {
                 Image(systemName: "rectangle.grid.3x3")
                 let idleLike = appState.scanState == .idle || appState.scanState == .stopped
                     || appState.scanState == .error || appState.scanState == .finished
-                Text(idleLike ? "点击「开始扫描」开始检测" : "准备中…")
+                Text(idleLike ? tr("点击「开始扫描」开始检测", "Click Start Scan to begin")
+                              : tr("准备中…", "Preparing…"))
                     .foregroundColor(.appSecondary)
                 Spacer()
             }
@@ -413,11 +415,12 @@ struct ScanMapView: View {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(statusColor(s))
                         .frame(width: 12, height: 12)
-                    Text(s.rawValue).font(.caption)
+                    Text(s.displayName).font(.caption)
                 }
             }
             Spacer()
-            Text("悬停查看格子详情，双指滑动平移，捏合缩放，双击复位")
+            Text(tr("悬停查看格子详情，双指滑动平移，捏合缩放，双击复位",
+                    "Hover for cell details · two-finger scroll to pan · pinch to zoom · double-click to reset"))
                 .font(.caption2).foregroundColor(.appTertiary)
         }
     }

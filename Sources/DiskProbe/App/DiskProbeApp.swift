@@ -1,4 +1,5 @@
 import SwiftUI
+import DiskProbeCore
 
 // MARK: - App 入口
 
@@ -18,6 +19,13 @@ struct DiskProbeApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appState)
+        }
+        .commands {
+            CommandGroup(after: .appSettings) {
+                Button(tr("检查更新…", "Check for Updates…")) {
+                    Task { try? await appState.checkForUpdates(manual: true) }
+                }
+            }
         }
     }
 }

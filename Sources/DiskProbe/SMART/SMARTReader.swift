@@ -14,15 +14,17 @@ struct SMARTInfo: Sendable {
     var interface: String?       // 接口类型（SATA/NVMe/USB...）
     var capacityBytes: Int64?    // 容量
 
-    // HDD
-    var reallocatedSectors: Int?    // 重映射扇区数
-    var pendingSectors: Int?        // 待定扇区数
-    var offlineUncorrectable: Int?  // 离线不可纠正
+    // HDD（ATA 属性）
+    var reallocatedSectors: Int?    // 05 重映射扇区数
+    var pendingSectors: Int?        // 197 当前待映射扇区
+    var offlineUncorrectable: Int?  // 198 离线不可纠正扇区
+    var crcErrors: Int?             // 199 接口 CRC 错误（多为线缆/接口问题）
 
     // SSD (NVMe)
     var percentUsed: Int?           // 寿命已用百分比
     var dataUnitsWritten: Int64?    // 已写数据量（512B 单位）
     var nandWrites: Int64?          // NAND 写入
+    var mediaErrors: Int?           // 介质错误数（盘面/闪存读错误）
 
     /// 总体判断：是否健康
     var isHealthy: Bool? {
@@ -114,6 +116,7 @@ actor SMARTReader {
                 case 194: info.temperatureC = num.map(Double.init) // Temperature_Celsius 优先
                 case 197: info.pendingSectors = num
                 case 198: info.offlineUncorrectable = num
+                case 199: info.crcErrors = num
                 default: break
                 }
             }
@@ -122,6 +125,7 @@ actor SMARTReader {
         // NVMe SMART
         if let nvme = json["nvme_smart_health_information_log"] as? [String: Any] {
             info.percentUsed = nvme["percentage_used"] as? Int
+            info.mediaErrors = nvme["media_errors"] as? Int
             if let temp = nvme["temperature"] as? Int {
                 // 实测确认：smartctl 7.5 的 NVMe JSON temperature 已是摄氏度
                 // （smartmontools 内部已把 NVMe log 的开尔文换算成摄氏度）

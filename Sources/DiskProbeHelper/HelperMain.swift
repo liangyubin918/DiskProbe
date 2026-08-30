@@ -44,9 +44,9 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         lock.lock()
         let busy = fd != -1
         lock.unlock()
-        guard !busy else { reply("扫描已在进行中"); return }
+        guard !busy else { reply(tr("扫描已在进行中", "A scan is already in progress")); return }
         guard blockSize >= 512, blockSize <= 4 * 1024 * 1024 else {
-            reply("块大小超出允许范围（512B–4MB）")
+            reply(tr("块大小超出允许范围（512B–4MB）", "Block size out of allowed range (512B–4MB)"))
             return
         }
         if let problem = Self.deviceProblem(devicePath) {
@@ -57,17 +57,17 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         guard newFD >= 0 else {
             // root 也会被 TCC 拦：读取裸设备需要完全磁盘访问权限（Full Disk Access）
             if errno == EPERM {
-                reply("[TCC] macOS 隐私保护拦截了裸设备读取。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 DiskProbe（App），然后重新扫描。若仍失败，把 helper 二进制（DiskProbe.app/Contents/Library/LaunchServices/local.diskprobe.helper）也加入列表。")
+                reply(tr("[TCC] macOS 隐私保护拦截了裸设备读取。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 DiskProbe（App），然后重新扫描。若仍失败，把 helper 二进制（DiskProbe.app/Contents/Library/LaunchServices/local.diskprobe.helper）也加入列表。", "[TCC] macOS privacy protection blocked raw-device access. Add DiskProbe (the app) under System Settings → Privacy & Security → Full Disk Access, then scan again. If it still fails, also add the helper binary (DiskProbe.app/Contents/Library/LaunchServices/local.diskprobe.helper)."))
                 return
             }
-            reply("无法打开 \(devicePath)：\(String(cString: strerror(errno)))（errno \(errno)）")
+            reply(tr("无法打开 \(devicePath)：\(String(cString: strerror(errno)))（errno \(errno)）", "Cannot open \(devicePath): \(String(cString: strerror(errno))) (errno \(errno))"))
             return
         }
         // 绕过页缓存：测的是真实盘面而不是内存缓存
         guard fcntl(newFD, F_NOCACHE, 1) == 0 else {
             let msg = String(cString: strerror(errno))
             close(newFD)
-            reply("设置 F_NOCACHE 失败：\(msg)")
+            reply(tr("设置 F_NOCACHE 失败：\(msg)", "Failed to set F_NOCACHE: \(msg)"))
             return
         }
 
@@ -119,7 +119,7 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         let connection = self.connection
         lock.unlock()
         guard scanFD >= 0, let connection, let proxy = connection.remoteObjectProxy as? HelperClientProtocol else {
-            finish(proxy: nil, error: "内部错误：连接或回调接口不可用")
+            finish(proxy: nil, error: tr("内部错误：连接或回调接口不可用", "Internal error: connection or callback interface unavailable"))
             return
         }
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: blockSize, alignment: MemoryLayout<UInt8>.alignment)
@@ -250,18 +250,18 @@ final class ScanRunner: NSObject, HelperScanProtocol {
 
     static func deviceProblem(_ path: String) -> String? {
         guard pathAllowed(path) else {
-            return "只允许扫描整盘裸设备（/dev/rdiskN）"
+            return tr("只允许扫描整盘裸设备（/dev/rdiskN）", "Only whole-disk raw devices are allowed (/dev/rdiskN)")
         }
         var ls = stat()
         guard lstat(path, &ls) == 0 else {
-            return "设备不存在：\(path)"
+            return tr("设备不存在：\(path)", "Device does not exist: \(path)")
         }
         // 拒绝符号链接（防 TOCTOU：先 lstat 再 open 之间被替换）
         guard (ls.st_mode & S_IFMT) != S_IFLNK else {
-            return "拒绝符号链接设备路径"
+            return tr("拒绝符号链接设备路径", "Symbolic-link device paths are rejected")
         }
         guard (ls.st_mode & S_IFMT) == S_IFCHR else {
-            return "不是磁盘设备节点（期望 /dev/rdiskN 字符设备）"
+            return tr("不是磁盘设备节点（期望 /dev/rdiskN 字符设备）", "Not a disk device node (expected /dev/rdiskN character device)")
         }
         return nil
     }

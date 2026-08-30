@@ -25,49 +25,52 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sectionHeader("扫描阈值（毫秒）")
-            keyValueRow("警告阈值") {
+            sectionHeader(tr("扫描阈值（毫秒）", "Scan Thresholds (ms)"))
+            keyValueRow(tr("警告阈值", "Warning above")) {
                 TextField("", text: $warnText, onCommit: commit)
                     .frame(width: 80)
             }
-            keyValueRow("异常阈值") {
+            keyValueRow(tr("异常阈值", "Abnormal above")) {
                 TextField("", text: $abnormalText, onCommit: commit)
                     .frame(width: 80)
             }
-            caption("读取耗时 ≥ 警告阈值标记为黄色；≥ 异常阈值标记为红色；读取失败标记为错误。")
+            caption(tr("读取耗时 ≥ 警告阈值标记为黄色；≥ 异常阈值标记为红色；读取失败标记为错误。",
+                       "Reads at or above the warning threshold are marked yellow; at or above the abnormal threshold, red; failed reads are marked as errors."))
 
             sectionDivider
 
-            sectionHeader("特权助手")
-            keyValueRow("状态") {
+            sectionHeader(tr("特权助手", "Privileged Helper"))
+            keyValueRow(tr("状态", "Status")) {
                 switch appState.helperStatus {
-                case .registered: Text("已注册").foregroundColor(.green)
-                case .requiresApproval: Text("待系统设置批准").foregroundColor(.orange)
-                case .notInstalled: Text("未安装")
-                case .notFound: Text("未找到（请从 .app 启动）")
+                case .registered: Text(tr("已注册", "Registered")).foregroundColor(.green)
+                case .requiresApproval: Text(tr("待系统设置批准", "Awaiting approval")).foregroundColor(.orange)
+                case .notInstalled: Text(tr("未安装", "Not installed"))
+                case .notFound: Text(tr("未找到（请从 .app 启动）", "Not found (launch from the .app)"))
                 }
             }
-            Button("重装特权助手（疑难修复）") { appState.reinstallHelper() }
+            Button(tr("重装特权助手（疑难修复）", "Reinstall Privileged Helper (Advanced Repair)")) { appState.reinstallHelper() }
                 .padding(.bottom, 10)
-            caption("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。")
+            caption(tr("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。",
+                       "Re-registering expires when the app is rebuilt or moved; the scan panel will offer a reinstall entry then. This is a fallback."))
 
             sectionDivider
 
-            sectionHeader("支持作者")
+            sectionHeader(tr("支持作者", "Support the Author"))
             Button {
                 showDonate = true
             } label: {
-                Label("赞赏作者", systemImage: "heart.fill")
+                Label(tr("赞赏作者", "Donate"), systemImage: "heart.fill")
                     .foregroundColor(.pink)
             }
             .padding(.bottom, 10)
-            caption("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。")
+            caption(tr("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。",
+                       "DiskProbe is completely free. If it helped you recover data or diagnose a problem, consider buying the author a coffee."))
             Text("DiskProbe v\(appVersion)")
                 .font(.caption2.monospacedDigit()).foregroundColor(.appTertiary)
         }
         .padding(20)
         .frame(width: 420)
-        .navigationTitle("DiskProbe 设置")
+        .navigationTitle(tr("DiskProbe 设置", "DiskProbe Settings"))
         .sheet(isPresented: $showDonate) {
             DonateSheet()
         }

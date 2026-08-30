@@ -265,3 +265,85 @@ import Testing
         #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
     }
 }
+
+// MARK: 检查更新：版本比较（逐段数值比较，2.10 > 2.9）
+
+@Suite struct UpdateVersionTests {
+    @Test func patchBumpIsNewer() {
+        #expect(UpdateChecker.isNewer("2.9", than: "2.8"))
+        #expect(!UpdateChecker.isNewer("2.8", than: "2.8"))
+        #expect(!UpdateChecker.isNewer("2.7", than: "2.8"))
+    }
+
+    @Test func twoDigitSegmentComparesNumerically() {
+        #expect(UpdateChecker.isNewer("2.10", than: "2.9"))
+        #expect(!UpdateChecker.isNewer("2.10", than: "2.10"))
+    }
+
+    @Test func vPrefixAndMissingSegments() {
+        #expect(UpdateChecker.isNewer("v3", than: "2.9.1"))
+        #expect(!UpdateChecker.isNewer("2", than: "2.0"))
+    }
+}
+
+// MARK: 检测记录对比（按偏移对齐）
+
+@Suite struct RecordDiffTests {
+    private func rec(_ block: Int, _ offset: Int64, _ status: BlockStatus) -> ScanRecord {
+        ScanRecord(blockIndex: block, offsetBytes: offset, elapsedMs: 10, status: status, errno: nil)
+    }
+
+    @Test func newWorsenedPersistentResolved() {
+        let old = [
+            rec(1, 128_000, .warning),    // 持续
+            rec(2, 256_000, .warning),    // 加重（本次 abnormal）
+            rec(3, 384_000, .abnormal),   // 恢复（本次无异常）
+        ]
+        let new = [
+            rec(1, 128_000, .warning),    // 持续
+            rec(2, 256_000, .abnormal),   // 加重
+            rec(9, 512_000, .error),      // 新增
+        ]
+        let d = RecordDiff.compute(old: old, new: new)
+        #expect(d.newCount == 1)
+        #expect(d.worsenedCount == 1)
+        #expect(d.persistentCount == 1)
+        #expect(d.resolvedCount == 1)
+        // 排序：新增 > 加重 > 持续 > 恢复
+        #expect(d.items.map(\.kind) == [.new, .worsened, .persistent, .resolved])
+    }
+
+    @Test func severityDecreaseCountsAsPersistent() {
+        let old = [rec(1, 0, .abnormal)]
+        let new = [rec(1, 0, .warning)]
+        let d = RecordDiff.compute(old: old, new: new)
+        #expect(d.persistentCount == 1)
+        #expect(d.worsenedCount == 0)
+        #expect(d.resolvedCount == 0)
+    }
+
+    @Test func emptyInputs() {
+        let d = RecordDiff.compute(old: [], new: [])
+        #expect(d.items.isEmpty)
+        #expect(d.newCount == 0)
+    }
+}
+
+// MARK: 记录 JSON 解析（与导出端互为镜像）
+
+@Suite struct RecordFileRoundTripTests {
+    @Test func parseExportedJSON() throws {
+        let meta = ScanMeta(diskName: "盘A", bsdName: "disk9", diskSizeBytes: 1024, blockSizeBytes: 128,
+                            totalBlocks: 8, warnMs: 100, abnormalMs: 500,
+                            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                            finishedAt: Date(timeIntervalSince1970: 1_700_000_060))
+        let anomalies = [ScanRecord(blockIndex: 3, offsetBytes: 384, elapsedMs: 600, status: .abnormal, errno: nil)]
+        let data = try ScanRecordExporter.json(meta: meta, summary: ScanSummary(normal: 7, abnormal: 1),
+                                               cells: [], anomalies: anomalies)
+        let parsed = try ScanRecordExporter.parseJSON(data)
+        #expect(parsed.meta?.bsdName == "disk9")
+        #expect(parsed.anomalies.count == 1)
+        #expect(parsed.anomalies[0].status == .abnormal)
+        #expect(parsed.anomalies[0].offsetBytes == 384)
+    }
+}

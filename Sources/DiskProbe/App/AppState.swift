@@ -1,9 +1,22 @@
 import Foundation
 import SwiftUI
 import AppKit
+import UserNotifications
 import ServiceManagement
 import UniformTypeIdentifiers
 import DiskProbeCore
+
+// MARK: - 前台也横幅展示通知的 delegate
+//（不设 delegate 时 app 在前台，系统会静默吞掉通知——长扫描用户常在别的窗口）
+
+final class ForegroundNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        // .alert 在 macOS 12+ 自动映射为横幅，11/12 原生支持
+        completionHandler([.alert, .sound])
+    }
+}
 
 // MARK: - 特权助手端到端健康状态
 
@@ -118,8 +131,17 @@ final class AppState: ObservableObject {
 
     let engine = ScanEngine()
 
+    private let notificationDelegate = ForegroundNotificationDelegate()
+
+    // MARK: 检查更新
+
+    @Published var availableUpdate: UpdateInfo? = nil
+    private static let updateLastCheckKey = "update.lastCheckAt"
+
     init() {
+        UNUserNotificationCenter.current().delegate = notificationDelegate
         Task { await refreshDisks() }
+        scheduleUpdateCheck()
         helperStatus = currentInstallStatus()
         // 无头模式：`open DiskProbe.app --args --register-helper` 注册完自动退出，
         // 用于脚本化安装/诊断（与点击"安装特权助手"完全同一条代码路径）
@@ -136,6 +158,50 @@ final class AppState: ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
             exit(0)
+        }
+    }
+
+    // MARK: 检查更新
+
+    /// 启动后延迟 3 秒静默检查，成功后 24 小时内不重复
+    private func scheduleUpdateCheck() {
+        let last = UserDefaults.standard.double(forKey: Self.updateLastCheckKey)
+        guard Date().timeIntervalSince1970 - last > 24 * 3600 else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            try? await checkForUpdates(manual: false)
+        }
+    }
+
+    /// 手动检查（菜单项）失败时弹窗提示；静默检查失败不声不响。
+    /// 发现有更新：设置 availableUpdate（主窗口横幅展示）。
+    func checkForUpdates(manual: Bool) async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.updateLastCheckKey)
+        do {
+            guard let update = try await UpdateChecker.fetchLatest() else {
+                if manual {
+                    let alert = NSAlert()
+                    alert.messageText = tr("当前已是最新版本", "You're up to date")
+                    alert.informativeText = tr("DiskProbe v\(UpdateChecker.currentVersion) 已是最新版本。",
+                                               "DiskProbe v\(UpdateChecker.currentVersion) is the latest version.")
+                    alert.runModal()
+                }
+                return
+            }
+            availableUpdate = update
+            if manual, let url = URL(string: update.url) {
+                NSWorkspace.shared.open(url)
+            }
+        } catch {
+            if manual {
+                let alert = NSAlert()
+                alert.messageText = tr("检查更新失败", "Update check failed")
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            } else {
+                return
+            }
         }
     }
 
@@ -223,18 +289,18 @@ final class AppState: ObservableObject {
             // 结果呈现：成功清掉旧错误；失败区分"未完成"与"已成功但有小问题"
             if outcome.ok {
                 if let unregErr = outcome.unregisterError {
-                    helperOpError = "已重新注册，但注销旧注册时报错：\(unregErr)。若扫描仍报助手未确认启动，请再重装一次。"
+                    helperOpError = tr("已重新注册，但注销旧注册时报错：\(unregErr)。若扫描仍报助手未确认启动，请再重装一次。", "Re-registered, but an error occurred while unregistering the old one: \(unregErr). If scans still report the helper did not start, reinstall once more.")
                 } else {
                     helperOpError = nil
                 }
             } else {
                 let detail = outcome.registerError ?? "未知错误"
                 if detail.contains("取消") {
-                    helperOpError = "已取消，特权助手未做更改。"
+                    helperOpError = tr("已取消，特权助手未做更改。", "Cancelled; the privileged helper was not changed.")
                 } else if helperStatus == .registered {
-                    helperOpError = "注册更新失败（\(detail)），当前仍是旧注册。请再试一次重装。"
+                    helperOpError = tr("注册更新失败（\(detail)），当前仍是旧注册。请再试一次重装。", "Registration update failed (\(detail)); the old registration is still in place. Try reinstalling again.")
                 } else {
-                    helperOpError = "\(reinstall ? "重装" : "安装")特权助手失败：\(detail)"
+                    helperOpError = tr("\(reinstall ? "重装" : "安装")特权助手失败：\(detail)", "\(reinstall ? "Reinstalling" : "Installing") the privileged helper failed: \(detail)")
                 }
             }
         }
@@ -395,6 +461,48 @@ final class AppState: ObservableObject {
 
     @Published var saveSuccessMessage: String? = nil
 
+    // MARK: 检测记录对比
+
+    @Published var showRecordDiff = false
+    /// 对比结果（items 为空 = 没有任何差异）
+    @Published var recordDiff: RecordDiff? = nil
+    /// 被对比的历史记录文件（展示其时间/阈值等信息）
+    @Published var recordDiffOldFile: ScanRecordFile? = nil
+    /// 本次扫描的 meta（展示时间/阈值）
+    @Published var recordDiffCurrentMeta: ScanMeta? = nil
+
+    /// 弹出文件选择器，把选中的历史 JSON 报告与本次扫描结果对比
+    func compareWithHistory() {
+        guard let disk = selectedDisk, scanResultsBelong(to: disk), scanState == .finished else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType.json]
+        panel.message = tr("选择之前导出的 JSON 完整报告，与本次扫描对比新增/加重/持续/恢复的异常块。", "Choose a previously exported JSON report to compare new/worsened/persistent/resolved bad blocks against this scan.")
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { await self?.runRecordCompare(url: url) }
+        }
+    }
+
+    private func runRecordCompare(url: URL) async {
+        do {
+            let data = try Data(contentsOf: url)
+            let old = try ScanRecordExporter.parseJSON(data)
+            let snapshot = await engine.exportSnapshot()
+            if let oldBSD = old.meta?.bsdName, oldBSD != snapshot.meta?.bsdName {
+                authError = tr("所选记录属于 /dev/\(oldBSD)，与当前扫描盘不一致，无法对比。", "That report belongs to /dev/\(oldBSD), not the scanned disk; cannot compare.")
+                return
+            }
+            recordDiff = RecordDiff.compute(old: old.anomalies, new: snapshot.anomalies)
+            recordDiffOldFile = old
+            recordDiffCurrentMeta = snapshot.meta
+            showRecordDiff = true
+        } catch {
+            authError = tr("无法读取检测记录：\(error.localizedDescription)", "Cannot read the report file: \(error.localizedDescription)")
+        }
+    }
+
     /// 扫描完成后导出检测记录（CSV 便于表格分析 / JSON 完整报告）。
     /// 格式选择用自绘 accessory 弹出菜单：macOS 26 起 allowedContentTypes 传
     /// 多个类型不再显示系统"文件格式"下拉框；这里固定单类型 + 自绘菜单，
@@ -463,9 +571,9 @@ final class AppState: ObservableObject {
                                                  cells: snapshot.cells, anomalies: snapshot.anomalies)
                 try csv.write(to: url, atomically: true, encoding: .utf8)
             }
-            saveSuccessMessage = "检测记录已保存：\(url.lastPathComponent)"
+            saveSuccessMessage = tr("检测记录已保存：\(url.lastPathComponent)", "Report saved: \(url.lastPathComponent)")
         } catch {
-            authError = "保存检测记录失败：\(error.localizedDescription)"
+            authError = tr("保存检测记录失败：\(error.localizedDescription)", "Failed to save the report: \(error.localizedDescription)")
         }
     }
 
@@ -489,10 +597,12 @@ final class AppState: ObservableObject {
 
         // 取消旧监听，保证进度流始终只有一个消费者
         listenerTask?.cancel()
+        requestScanNotificationPermission()
         listenerTask = Task {
             refreshHelperStatus()
             guard helperStatus == .registered else {
-                authError = "真实扫描需要先安装特权助手（含 root 授权）。若已安装仍失败，请点「重装特权助手」。"
+                authError = tr("真实扫描需要先安装特权助手（含 root 授权）。若已安装仍失败，请点「重装特权助手」。",
+                            "A real scan requires the privileged helper (with root authorization). If it is installed but still failing, click Reinstall Privileged Helper.")
                 await syncState()
                 return
             }
@@ -502,7 +612,7 @@ final class AppState: ObservableObject {
                 cellCount: mapColumns * mapRows
             )
             guard started else {
-                authError = await engine.takeLastAuthError() ?? "无法开始扫描。"
+                authError = await engine.takeLastAuthError() ?? tr("无法开始扫描。", "Unable to start the scan.")
                 await syncState()
                 return
             }
@@ -542,6 +652,39 @@ final class AppState: ObservableObject {
             await syncState()
         }
         await syncState()
+        // 只有自然扫完才通知；用户主动停止（.stopped）不打扰
+        if await engine.state == .finished {
+            notifyScanFinished()
+        }
+    }
+
+    // MARK: 扫描完成系统通知
+
+    /// 首次扫描时静默请求通知权限（拒绝过也不再弹，不影响使用）
+    private func requestScanNotificationPermission() {
+        Task {
+            _ = try? await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])
+        }
+    }
+
+    private func notifyScanFinished() {
+        // 注意不用 activeScanDiskName：它只在 scanning/paused 态有值
+        let diskName = disks.first(where: { $0.id == resultsDiskID })?.displayName
+            ?? selectedDisk?.displayName ?? tr("磁盘", "disk")
+        let content = UNMutableNotificationContent()
+        content.title = tr("扫描完成", "Scan Finished")
+        if statError > 0 || statAbnormal > 0 {
+            content.body = tr("「\(diskName)」发现 \(statError + statAbnormal) 个坏块/异常块，建议立即备份重要数据。",
+                              "“\(diskName)” has \(statError + statAbnormal) bad/abnormal blocks — back up important data now.")
+            content.sound = .defaultCritical
+        } else {
+            content.body = tr("「\(diskName)」状态良好，未发现问题。",
+                              "“\(diskName)” looks healthy; no issues found.")
+        }
+        let request = UNNotificationRequest(identifier: "diskprobe.scan.finished.\(Date().timeIntervalSince1970)",
+                                            content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: 进度应用

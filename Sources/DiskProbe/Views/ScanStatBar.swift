@@ -15,21 +15,28 @@ struct ScanStatBar: View {
 
     var body: some View {
         HStack(spacing: 18) {
-            statItem("正常", count: statNormal,   color: .green)
-            statItem("警告", count: statWarning,  color: .yellow)
-            statItem("异常", count: statAbnormal, color: .red)
-            statItem("错误", count: statError,    color: StatusPalette.errorDark)
+            statItem(tr("正常", "Normal"), count: statNormal,   color: .green)
+            statItem(tr("警告", "Warning"), count: statWarning,  color: .yellow)
+            statItem(tr("异常", "Abnormal"), count: statAbnormal, color: .red)
+            statItem(tr("错误", "Error"), count: statError,    color: StatusPalette.errorDark)
 
             Spacer()
 
             healthVerdict
 
             if !forcedZero, appState.scanState == .finished {
-                Button { appState.saveScanRecord() } label: {
-                    Label("保存检测记录", systemImage: "square.and.arrow.down")
+                Button { appState.compareWithHistory() } label: {
+                    Label(tr("对比历史记录", "Compare History"), systemImage: "arrow.left.arrow.right.square")
                 }
                 .controlSize(.small)
-                .help("导出 CSV（表格分析）或 JSON（完整报告）")
+                .help(tr("导入之前导出的 JSON 报告，对比两次扫描的新增/加重/持续/恢复异常块",
+                         "Import a previously exported JSON report and compare new/worsened/persistent/resolved bad blocks"))
+                Button { appState.saveScanRecord() } label: {
+                    Label(tr("保存检测记录", "Save Report"), systemImage: "square.and.arrow.down")
+                }
+                .controlSize(.small)
+                .help(tr("导出 CSV（表格分析）或 JSON（完整报告）",
+                         "Export CSV (for spreadsheets) or JSON (full report)"))
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
@@ -41,15 +48,15 @@ struct ScanStatBar: View {
 
     @ViewBuilder private var healthVerdict: some View {
         if scannedTotal == 0 {
-            Text("等待扫描").font(.caption).foregroundColor(.appSecondary)
+            Text(tr("等待扫描", "Waiting to scan")).font(.caption).foregroundColor(.appSecondary)
         } else if statError > 0 {
-            label("⚠️ 发现 \(statError) 个读取错误块", .red)
+            label(tr("⚠️ 发现 \(statError) 个读取错误块", "⚠️ \(statError) blocks failed to read"), .red)
         } else if statAbnormal > 0 {
-            label("⚠️ 发现 \(statAbnormal) 个异常块", .red)
+            label(tr("⚠️ 发现 \(statAbnormal) 个异常块", "⚠️ \(statAbnormal) abnormal blocks"), .red)
         } else if statWarning > 0 {
-            label("Δ \(statWarning) 个慢速块", .orange)
+            label(tr("Δ \(statWarning) 个慢速块", "Δ \(statWarning) slow blocks"), .orange)
         } else {
-            label("✓ 暂未发现问题", .green)
+            label(tr("✓ 暂未发现问题", "✓ No issues found so far"), .green)
         }
     }
 

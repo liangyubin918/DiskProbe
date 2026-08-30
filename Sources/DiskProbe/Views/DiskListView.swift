@@ -15,17 +15,17 @@ struct DiskListView: View {
                 let others = appState.disks.filter { !$0.isExternalPhysical && !$0.isInternal }
 
                 if !external.isEmpty {
-                    Section(header: Text("外置硬盘")) {
+                    Section(header: Text(tr("外置硬盘", "External"))) {
                         ForEach(external) { DiskRow(disk: $0) }
                     }
                 }
                 if !internal_.isEmpty {
-                    Section(header: Text("内置硬盘")) {
+                    Section(header: Text(tr("内置硬盘", "Internal"))) {
                         ForEach(internal_) { DiskRow(disk: $0) }
                     }
                 }
                 if !others.isEmpty {
-                    Section(header: Text("其他")) {
+                    Section(header: Text(tr("其他", "Other"))) {
                         ForEach(others) { DiskRow(disk: $0) }
                     }
                 }
@@ -36,12 +36,12 @@ struct DiskListView: View {
                 Divider()
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("正在枚举磁盘…").font(.caption).foregroundColor(.appSecondary)
+                    Text(tr("正在枚举磁盘…", "Enumerating disks…")).font(.caption).foregroundColor(.appSecondary)
                 }
                 .padding(.vertical, 6)
             }
         }
-        .navigationTitle("磁盘")
+        .navigationTitle(tr("磁盘", "Disks"))
     }
 }
 

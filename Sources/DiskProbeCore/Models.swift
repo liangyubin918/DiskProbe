@@ -22,6 +22,9 @@ public enum BlockStatus: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// 展示名（跟随系统语言）。JSON 报告里仍写 rawValue（中文）保持数据格式稳定。
+    public var displayName: String { tr(rawValue, key) }
+
     /// 严重程度排序：地图格子里多个块共用一格时，取最严重的状态
     public var severityOrder: Int {
         switch self {

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import DiskProbeCore
 
 // MARK: - 赞赏弹窗
 
@@ -11,8 +12,8 @@ struct DonateSheet: View {
     @Environment(\.presentationMode) private var presentationMode
 
     private let candidates: [(title: String, resource: String, tint: Color)] = [
-        ("微信", "Donate-WeChat", .green),
-        ("支付宝", "Donate-Alipay", .blue),
+        (tr("微信", "WeChat"), "Donate-WeChat", .green),
+        (tr("支付宝", "Alipay"), "Donate-Alipay", .blue),
     ]
 
     private var cards: [(title: String, image: NSImage, tint: Color)] {
@@ -24,9 +25,9 @@ struct DonateSheet: View {
     var body: some View {
         VStack(spacing: 18) {
             VStack(spacing: 6) {
-                Text("如果 DiskProbe 帮到了你")
+                Text(tr("如果 DiskProbe 帮到了你", "If DiskProbe helped you"))
                     .font(.title3.weight(.bold))
-                Text("扫码请作者喝杯咖啡")
+                Text(tr("扫码请作者喝杯咖啡", "Scan to buy the author a coffee"))
                     .font(.callout).foregroundColor(.appSecondary)
             }
 
@@ -34,7 +35,7 @@ struct DonateSheet: View {
                 VStack(spacing: 8) {
                     Image(systemName: "qrcode")
                         .font(.system(size: 40))
-                    Text("收款码待放置")
+                    Text(tr("收款码待放置", "QR codes not bundled"))
                         .font(.caption)
                 }
                 .foregroundColor(.appTertiary)
@@ -57,10 +58,10 @@ struct DonateSheet: View {
                 }
             }
 
-            Text("金额随意，心意最重要")
+            Text(tr("金额随意，心意最重要", "Any amount matters — the thought counts"))
                 .font(.caption).foregroundColor(.appTertiary)
 
-            Button("关闭") { presentationMode.wrappedValue.dismiss() }
+            Button(tr("关闭", "Close")) { presentationMode.wrappedValue.dismiss() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(28)

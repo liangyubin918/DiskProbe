@@ -13,26 +13,32 @@ public enum ScanRecordExporter {
         var lines: [String] = []
         let fmt = Self.dateFormatter
 
-        lines.append("DiskProbe 扫描记录")
+        lines.append(tr("DiskProbe 扫描记录", "DiskProbe Scan Report"))
         if let m = meta {
-            lines.append("磁盘,\(escape("\(m.diskName) (/dev/\(m.bsdName))"))")
-            lines.append("容量,\(m.diskSizeBytes) 字节")
-            lines.append("块大小,\(m.blockSizeBytes) 字节")
-            lines.append("块总数,\(m.totalBlocks)")
-            lines.append("阈值,\(escape("警告 \(Int(m.warnMs)) ms / 异常 \(Int(m.abnormalMs)) ms"))")
-            lines.append("开始,\(fmt.string(from: m.startedAt))")
-            if let f = m.finishedAt { lines.append("结束,\(fmt.string(from: f))") }
+            let thresholdText = tr("警告 \(Int(m.warnMs)) ms / 异常 \(Int(m.abnormalMs)) ms",
+                                   "warning \(Int(m.warnMs)) ms / abnormal \(Int(m.abnormalMs)) ms")
+            lines.append(tr("磁盘", "Disk") + ",\(escape("\(m.diskName) (/dev/\(m.bsdName))"))")
+            lines.append(tr("容量", "Capacity") + ",\(m.diskSizeBytes) " + tr("字节", "bytes"))
+            lines.append(tr("块大小", "Block size") + ",\(m.blockSizeBytes) " + tr("字节", "bytes"))
+            lines.append(tr("块总数", "Total blocks") + ",\(m.totalBlocks)")
+            lines.append(tr("阈值", "Thresholds") + "," + escape(thresholdText))
+            lines.append(tr("开始", "Started") + ",\(fmt.string(from: m.startedAt))")
+            if let f = m.finishedAt { lines.append(tr("结束", "Finished") + ",\(fmt.string(from: f))") }
         }
         if let s = summary {
-            lines.append("汇总,\(escape("正常 \(s.normal) / 警告 \(s.warning) / 异常 \(s.abnormal) / 错误 \(s.error)"))")
+            let summaryText = tr("正常 \(s.normal) / 警告 \(s.warning) / 异常 \(s.abnormal) / 错误 \(s.error)",
+                                 "normal \(s.normal) / warning \(s.warning) / abnormal \(s.abnormal) / error \(s.error)")
+            lines.append(tr("汇总", "Summary") + "," + escape(summaryText))
         }
-        lines.append("说明,\(escape("块级明细仅含非正常块（警告/异常/错误）；格子明细覆盖全盘，状态取格内最严重块，耗时为该状态的采样值"))")
+        let noteText = tr("块级明细仅含非正常块（警告/异常/错误）；格子明细覆盖全盘，状态取格内最严重块，耗时为该状态的采样值",
+                          "Block detail lists only non-normal blocks (warning/abnormal/error); cell detail covers the whole disk with the most severe status per cell and its sampled elapsed time")
+        lines.append(tr("说明", "Note") + "," + escape(noteText))
         lines.append("")
 
         // 格子明细：正常块不逐条落盘（百万行级），但格子汇总始终有全盘数据可分析
         if let m = meta, m.totalBlocks > 0, !cells.isEmpty {
-            lines.append("格子明细")
-            lines.append("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号")
+            lines.append(tr("格子明细", "Cell detail"))
+            lines.append(tr("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号", "cell,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index"))
             // 与 ScanEngine.cellsPerBlockGroup 同一公式：导出端无法访问引擎内部，按同一定义重算
             let per = (m.totalBlocks + cells.count - 1) / cells.count
             for (i, c) in cells.enumerated() {
@@ -40,25 +46,25 @@ public enum ScanRecordExporter {
                 let lastBlock = min(m.totalBlocks, (i + 1) * per) - 1
                 let offset = Int64(firstBlock) * m.blockSizeBytes
                 let scanned = c.blockIndex >= 0
-                lines.append("\(i),\(firstBlock),\(lastBlock),\(offset),\(c.status.rawValue),"
+                lines.append("\(i),\(firstBlock),\(lastBlock),\(offset),\(c.status.displayName),"
                              + (scanned ? csvNumber(c.elapsedMs) : "") + ","
                              + (scanned ? String(c.blockIndex) : ""))
             }
             lines.append("")
         }
 
-        lines.append("异常块明细")
-        lines.append("块序号,偏移(字节),耗时(ms),状态,errno")
+        lines.append(tr("异常块明细", "Non-normal block detail"))
+        lines.append(tr("块序号,偏移(字节),耗时(ms),状态,errno", "block index,offset (bytes),elapsed (ms),status,errno"))
         if anomalies.isEmpty {
             // 全部块正常时明细为空：写明原因，避免被当成导出错漏
-            lines.append("（本次无非正常块）")
+            lines.append(tr("（本次无非正常块）", "(no non-normal blocks in this scan)"))
         } else {
             for r in anomalies {
                 let errno = r.errno.map(String.init) ?? ""
-                lines.append("\(r.blockIndex),\(r.offsetBytes),\(csvNumber(r.elapsedMs)),\(r.status.rawValue),\(errno)")
+                lines.append("\(r.blockIndex),\(r.offsetBytes),\(csvNumber(r.elapsedMs)),\(r.status.displayName),\(errno)")
             }
         }
-        // BOM：让 Excel/Numbers 按 UTF-8 识别中文
+        // BOM：让 Excel/Numbers 按 UTF-8 识别非 ASCII 文本
         return "\u{FEFF}" + lines.joined(separator: "\n") + "\n"
     }
 
