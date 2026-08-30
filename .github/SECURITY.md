@@ -6,9 +6,10 @@
 如果你发现任何安全问题（提权、绕过校验、任意设备访问等）：
 
 - **请勿公开提交 Issue**
-- 发送邮件至 [yubinliang918@gmail.com](mailto:yubinliang918@gmail.com)
+- 使用 GitHub 私有漏洞报告：仓库 **Security 标签页 → Report a vulnerability**，
+  或访问 https://github.com/liangyubin918/DiskProbe/security/advisories/new
 
-收到报告后会在 72 小时内回复，确认后尽快修复并发布新版本，修复前对细节保密。
+收到报告后会尽快回复，确认后修复并发布新版本，修复前对细节保密。
 
 ## 支持的版本
 

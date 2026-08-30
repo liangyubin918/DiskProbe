@@ -13,7 +13,7 @@
 ## 待办 / 后续想法
 
 - [ ] README 顶部截图占位（shell 无屏幕录制权限，需用户自己截：docs/screenshot.png）
-- [ ] 联系邮箱已配：yubinliang918@gmail.com（README 联系区 + .github/SECURITY.md）
+- [x] 安全报告走 GitHub 私有漏洞报告（用户要求不放邮箱，反馈走社交媒体）
 - [ ] 支付宝码用户暂不放；Resources/Donate-Alipay.png 放入即自动双卡展示
 - [ ] 免费 Apple Development 证书 1 年有效（约 2027-08 过期），届时重新构建发版
 - [ ] 想法：两次扫描记录对比 diff、断点续扫、Intel 构建

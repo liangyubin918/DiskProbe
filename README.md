@@ -78,7 +78,7 @@ DiskProbeHelper（root 权限 launchd daemon，SMAppService 安装）
 ## 联系与支持
 
 - 问题反馈：提交 [Issue](https://github.com/liangyubin918/DiskProbe/issues)
-- 安全漏洞：**请勿公开提交**，邮件至 [yubinliang918@gmail.com](mailto:yubinliang918@gmail.com)（见 [安全策略](.github/SECURITY.md)）
+- 安全漏洞：**请勿公开提交**，使用 GitHub 的「Report a vulnerability」私有报告入口（见 [安全策略](.github/SECURITY.md)）
 - 如果 DiskProbe 帮到了你，可以在 app 内「设置 → 支持作者」扫码请作者喝杯咖啡 ❤️
 
 ## License
