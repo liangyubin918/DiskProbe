@@ -16,6 +16,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # runner 镜像预装多个 Xcode，默认选中的可能不含 swift-testing
+      # （import Testing 需要 Xcode 16+），这里显式选最新版
+      - name: 选择最新 Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          swift --version
+
       - name: Swift 版本
         run: swift --version
 
