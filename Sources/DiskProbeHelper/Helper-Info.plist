@@ -9,8 +9,8 @@
     <key>CFBundleName</key><string>DiskProbeHelper</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleVersion</key><string>2.7</string>
-    <key>CFBundleShortVersionString</key><string>2.7</string>
+    <key>CFBundleVersion</key><string>2.8</string>
+    <key>CFBundleShortVersionString</key><string>2.8</string>
     <!-- SMJobBless 要求：允许安装/升级本 helper 的客户端（app）签名要求。
          不锁定 Team ID（静态文件无法按机器注入）；helper 在 XPC 层另行校验
          客户端为同一签名团队 + app identifier，跨团队冒用由此兜底。 -->
