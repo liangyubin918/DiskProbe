@@ -22,17 +22,14 @@ DIST_DIR="dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 
 # 多架构构建由 xcbuild 接管，产物在 .build/apple/Products/<Release|Debug>；
-# 单架构构建产物在 .build/<release|debug>。两者取存在的那个。
+# 单架构构建产物在 .build/<release|debug>。
+# 注意：产物目录必须在 swift build 之后判断——构建前判断会拿到上一次构建的
+# 陈旧目录（甚至回退到同样陈旧的 .build/<mode>），静默打出旧二进制。
 case "$MODE_NAME" in
     release) XCODE_PROD_DIR=".build/apple/Products/Release" ;;
     debug)   XCODE_PROD_DIR=".build/apple/Products/Debug" ;;
     *)       XCODE_PROD_DIR="" ;;
 esac
-if [ -n "$XCODE_PROD_DIR" ] && [ -f "$XCODE_PROD_DIR/$APP_NAME" ]; then
-    BUILD_DIR="$XCODE_PROD_DIR"
-else
-    BUILD_DIR=".build/${MODE_NAME}"
-fi
 
 echo "==> 1/5 构建 ($MODE, Universal 2: arm64 + x86_64)..."
 # 多架构构建需要完整版 Xcode 的 xcbuild；装了 Xcode 就优先用它（不影响全局 xcode-select）
@@ -40,6 +37,16 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [ -x "/Applications/Xcode.app/Contents/Develop
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
 swift build -c "${MODE#--}" --arch arm64 --arch x86_64
+
+if [ -n "$XCODE_PROD_DIR" ] && [ -f "$XCODE_PROD_DIR/$APP_NAME" ]; then
+    BUILD_DIR="$XCODE_PROD_DIR"
+else
+    BUILD_DIR=".build/${MODE_NAME}"
+fi
+if [ "$BUILD_DIR/$APP_NAME" -ot "$APP_BUNDLE/Contents/MacOS/$APP_NAME" ] 2>/dev/null; then
+    echo "  ⚠️ 警告：新构建的二进制比 dist 里的旧（时钟异常？），继续按新构建打包"
+fi
+echo "  使用产物：$BUILD_DIR/$APP_NAME"
 
 echo "==> 2/5 组装 .app bundle..."
 rm -rf "$APP_BUNDLE"
@@ -61,8 +68,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>DiskProbe</string>
     <key>CFBundleIdentifier</key><string>local.diskprobe</string>
-    <key>CFBundleVersion</key><string>2.8</string>
-    <key>CFBundleShortVersionString</key><string>2.8</string>
+    <key>CFBundleVersion</key><string>2.9</string>
+    <key>CFBundleShortVersionString</key><string>2.9</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
