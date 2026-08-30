@@ -222,27 +222,33 @@ import Testing
         MapCell(status: .unscanned, elapsedMs: 0, blockIndex: -1),
     ]
 
+    // 断言通过与导出端同一个 tr() 构造，语言无关（CI runner 可能是英文环境），
+    // 验证的是行结构与数据而非具体语言
     @Test func csvContainsMetaAndAnomalies() {
         let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: anomalies)
         #expect(csv.hasPrefix("\u{FEFF}"))                       // Excel 需要 BOM
-        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
-        #expect(csv.contains("12,1572864,612.3,异常,"))
-        #expect(csv.contains("15,1966080,1450.0,错误,5"))
-        #expect(csv.contains("正常 30500 / 警告 10 / 异常 6 / 错误 2"))
+        #expect(csv.contains(tr("块序号,偏移(字节),耗时(ms),状态,errno",
+                                "block index,offset (bytes),elapsed (ms),status,errno")))
+        #expect(csv.contains("12,1572864,612.3,\(BlockStatus.abnormal.displayName),"))
+        #expect(csv.contains("15,1966080,1450.0,\(BlockStatus.error.displayName),5"))
+        #expect(csv.contains(tr("正常 30500 / 警告 10 / 异常 6 / 错误 2",
+                                "normal 30500 / warning 10 / abnormal 6 / error 2")))
     }
 
     @Test func csvCellDetailCoversWholeDisk() {
         let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: anomalies)
-        #expect(csv.contains("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号"))
-        #expect(csv.contains("0,0,10172,0,正常,8.0,0"))
-        #expect(csv.contains("1,10173,20345,1333395456,警告,120.5,12"))
-        #expect(csv.contains("2,20346,30517,2666790912,未扫描,,"))  // 未扫描格无采样值
+        #expect(csv.contains(tr("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号",
+                                "cell,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index")))
+        #expect(csv.contains("0,0,10172,0,\(BlockStatus.normal.displayName),8.0,0"))
+        #expect(csv.contains("1,10173,20345,1333395456,\(BlockStatus.warning.displayName),120.5,12"))
+        #expect(csv.contains("2,20346,30517,2666790912,\(BlockStatus.unscanned.displayName),,"))  // 未扫描格无采样值
     }
 
     @Test func csvExplainsEmptyAnomalyDetail() {
         let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: [])
-        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
-        #expect(csv.contains("（本次无非正常块）"))
+        #expect(csv.contains(tr("块序号,偏移(字节),耗时(ms),状态,errno",
+                                "block index,offset (bytes),elapsed (ms),status,errno")))
+        #expect(csv.contains(tr("（本次无非正常块）", "(no non-normal blocks in this scan)")))
     }
 
     @Test func csvEscapesCommasInDiskName() {
@@ -262,7 +268,8 @@ import Testing
 
     @Test func emptyAnomaliesStillHasHeader() {
         let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: [], anomalies: [])
-        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
+        #expect(csv.contains(tr("块序号,偏移(字节),耗时(ms),状态,errno",
+                                "block index,offset (bytes),elapsed (ms),status,errno")))
     }
 }
 

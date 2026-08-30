@@ -36,10 +36,13 @@ enum UpdateChecker {
                           url: json["html_url"] as? String ?? releasesPage)
     }
 
-    /// 逐段数值比较（"2.10" > "2.9"）；候选版本没有更新的返回 false
+    /// 逐段数值比较（"2.10" > "2.9"）；容忍候选版本带 "v" 前缀（"v3"）。
+    /// 候选版本没有更新的返回 false
     static func isNewer(_ candidate: String, than current: String) -> Bool {
         func numbers(_ s: String) -> [Int] {
-            s.split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
+            s.drop { $0 == "v" || $0 == "V" }
+                .split(separator: ".")
+                .map { Int($0.prefix { $0.isNumber }) ?? 0 }
         }
         let c = numbers(candidate), cur = numbers(current)
         for i in 0..<max(c.count, cur.count) {
