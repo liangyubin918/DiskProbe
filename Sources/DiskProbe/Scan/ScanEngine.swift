@@ -159,6 +159,11 @@ actor ScanEngine {
         progressAsyncStream ?? AsyncStream { $0.finish() }
     }
 
+    /// 进度推送节流间隔。快盘（NVMe/T2）上一秒可回 100+ 批，逐批推送会以同样
+    /// 频率在主线程重建 6000 格地图并整树刷新 SwiftUI，主线程被打满后菜单栏等
+    /// 前台交互全部饿死（GitHub issue #1）。进度是全量快照，丢弃中间事件不影响正确性。
+    static let progressMinIntervalNanos: UInt64 = 100_000_000
+
     /// 真实扫描：消费 helper 回传的批次流，复用与演示扫描相同的
     /// 分类/统计/地图/速度逻辑。
     private func runRealScan(runID: UUID, scanStart: Date, batches: AsyncStream<ScanBatch>) async {
@@ -167,6 +172,8 @@ actor ScanEngine {
         var pausedTotal: TimeInterval = 0
         var pauseBegan: Date? = nil
         var pauseSentToHelper = false
+        var lastBlock: ScanBlock? = nil
+        var lastYieldUptime: UInt64 = 0
 
         for await batch in batches {
             guard isCurrent(runID) else { return }
@@ -196,9 +203,8 @@ actor ScanEngine {
                 pauseSentToHelper = false
             }
 
-            // 整批处理完只 yield 一次：进度是全量快照，逐块 yield 会把
+            // 整批处理完只考虑推送一次：进度是全量快照，逐块推送会把
             // 6000 格快照重复拷贝上百次
-            var lastBlock: ScanBlock? = nil
             for k in 0..<batch.count {
                 let i = batch.firstIndex + k
                 guard i < totalBlocks else { continue }
@@ -235,27 +241,20 @@ actor ScanEngine {
                 lastBlock = block
             }
 
-            if let last = lastBlock {
-                summary.unscanned = max(0, totalBlocks - scanned)
-                let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
-                let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
-                let remaining = max(0, totalBlocks - scanned)
-                let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
-                progressStream?.yield(ScanProgress(
-                    currentIndex: last.id,
-                    totalBlocks: totalBlocks,
-                    scannedCount: scanned,
-                    elapsedSeconds: elapsed,
-                    speedMBps: speed,
-                    etaSeconds: eta,
-                    lastBlock: last,
-                    summary: summary,
-                    mapCells: map
-                ))
+            let now = DispatchTime.now().uptimeNanoseconds
+            if let last = lastBlock, now - lastYieldUptime >= Self.progressMinIntervalNanos {
+                lastYieldUptime = now
+                yieldProgress(lastBlock: last, scanned: scanned, summary: summary,
+                              scanStart: scanStart, pausedTotal: pausedTotal)
             }
         }
 
         guard isCurrent(runID) else { return }
+        // 补发最终快照：最后一批可能因节流未推送，保证收尾时进度/统计完整
+        if let last = lastBlock {
+            yieldProgress(lastBlock: last, scanned: scanned, summary: summary,
+                          scanStart: scanStart, pausedTotal: pausedTotal)
+        }
         if let error = realSession?.lastError {
             lastAuthError = "扫描异常终止：\(error)"
             finish(runID: runID, state: .error)
@@ -264,6 +263,28 @@ actor ScanEngine {
             finalSummary = summary
             finish(runID: runID, state: .finished)
         }
+    }
+
+    /// 组装并推送一条全量进度快照（内部自动补全未扫描数与速度/ETA）
+    private func yieldProgress(lastBlock: ScanBlock, scanned: Int, summary: ScanSummary,
+                               scanStart: Date, pausedTotal: TimeInterval) {
+        var summary = summary
+        summary.unscanned = max(0, totalBlocks - scanned)
+        let elapsed = Date().timeIntervalSince(scanStart) - pausedTotal
+        let speed = updateSpeed(elapsed: elapsed, scanned: scanned)
+        let remaining = max(0, totalBlocks - scanned)
+        let eta = Double(remaining) * elapsed / Double(max(scanned, 1))
+        progressStream?.yield(ScanProgress(
+            currentIndex: lastBlock.id,
+            totalBlocks: totalBlocks,
+            scannedCount: scanned,
+            elapsedSeconds: elapsed,
+            speedMBps: speed,
+            etaSeconds: eta,
+            lastBlock: lastBlock,
+            summary: summary,
+            mapCells: map
+        ))
     }
 
     /// 导出检测记录的完整快照（在扫描结束后调用）
