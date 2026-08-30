@@ -215,9 +215,15 @@ import Testing
         ScanRecord(blockIndex: 15, offsetBytes: 1_966_080, elapsedMs: 1450.0,
                    status: .error, errno: 5),
     ]
+    /// 3 个格子覆盖 30518 块：per = ceil(30518/3) = 10173
+    let cells = [
+        MapCell(status: .normal, elapsedMs: 8.0, blockIndex: 0),
+        MapCell(status: .warning, elapsedMs: 120.5, blockIndex: 12),
+        MapCell(status: .unscanned, elapsedMs: 0, blockIndex: -1),
+    ]
 
     @Test func csvContainsMetaAndAnomalies() {
-        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: anomalies)
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: anomalies)
         #expect(csv.hasPrefix("\u{FEFF}"))                       // Excel 需要 BOM
         #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
         #expect(csv.contains("12,1572864,612.3,异常,"))
@@ -225,8 +231,22 @@ import Testing
         #expect(csv.contains("正常 30500 / 警告 10 / 异常 6 / 错误 2"))
     }
 
+    @Test func csvCellDetailCoversWholeDisk() {
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: anomalies)
+        #expect(csv.contains("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号"))
+        #expect(csv.contains("0,0,10172,0,正常,8.0,0"))
+        #expect(csv.contains("1,10173,20345,1333395456,警告,120.5,12"))
+        #expect(csv.contains("2,20346,30517,2666790912,未扫描,,"))  // 未扫描格无采样值
+    }
+
+    @Test func csvExplainsEmptyAnomalyDetail() {
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: [])
+        #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
+        #expect(csv.contains("（本次无非正常块）"))
+    }
+
     @Test func csvEscapesCommasInDiskName() {
-        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: [])
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: [])
         #expect(csv.contains("\"WD Elements, 25A3 (/dev/disk8)\""))
     }
 
@@ -241,7 +261,7 @@ import Testing
     }
 
     @Test func emptyAnomaliesStillHasHeader() {
-        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, anomalies: [])
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: [], anomalies: [])
         #expect(csv.contains("块序号,偏移(字节),耗时(ms),状态,errno"))
     }
 }

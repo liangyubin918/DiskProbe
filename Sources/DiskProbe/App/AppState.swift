@@ -395,31 +395,72 @@ final class AppState: ObservableObject {
 
     @Published var saveSuccessMessage: String? = nil
 
-    /// 扫描完成后导出检测记录（CSV 便于表格分析 / JSON 完整报告），
-    /// 由存储面板的下拉框选择格式，按扩展名写盘
+    /// 扫描完成后导出检测记录（CSV 便于表格分析 / JSON 完整报告）。
+    /// 格式选择用自绘 accessory 弹出菜单：macOS 26 起 allowedContentTypes 传
+    /// 多个类型不再显示系统"文件格式"下拉框；这里固定单类型 + 自绘菜单，
+    /// macOS 11–26 表现一致，也避免老系统上两套下拉框并存。
     func saveScanRecord() {
         guard let disk = selectedDisk, scanResultsBelong(to: disk), scanState == .finished else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.commaSeparatedText, .json]
-        panel.nameFieldStringValue = Self.defaultRecordName(disk: disk)
         panel.canCreateDirectories = true
-        panel.message = "CSV 适合表格分析；JSON 为完整报告（含地图快照）。在格式下拉框中选择类型。"
+        panel.message = "CSV 适合表格分析；JSON 为完整报告（含地图快照）。在下方格式菜单中选择类型。"
+
+        let extensions = ["csv", "json"]
+        let baseName = Self.defaultRecordName(disk: disk)
+        let formatHandler = FormatPopupHandler { [weak panel] index in
+            guard let panel else { return }
+            panel.allowedContentTypes = [index == 1 ? UTType.json : UTType.commaSeparatedText]
+            panel.nameFieldStringValue = Self.applyingExtension(baseName, ext: extensions[index])
+        }
+
+        let label = NSTextField(labelWithString: "格式:")
+        label.frame = NSRect(x: 0, y: 6, width: 38, height: 17)
+        label.alignment = .right
+        let popup = NSPopUpButton(frame: NSRect(x: 42, y: 2, width: 230, height: 26))
+        popup.addItems(withTitles: ["CSV（表格分析）", "JSON（完整报告）"])
+        popup.target = formatHandler
+        popup.action = #selector(FormatPopupHandler.selectionChanged(_:))
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 30))
+        accessory.addSubview(label)
+        accessory.addSubview(popup)
+        panel.accessoryView = accessory
+
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = baseName + ".csv"
+
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            Task { await self?.writeRecord(to: url) }
+            // 弹出菜单是格式的唯一事实来源：扩展名与所选格式不符时以菜单为准补正
+            let index = popup.indexOfSelectedItem
+            let ext = extensions[index]
+            let finalURL = url.pathExtension.lowercased() == ext
+                ? url
+                : url.deletingPathExtension().appendingPathExtension(ext)
+            Task { await self?.writeRecord(to: finalURL, format: index == 1 ? .json : .csv) }
         }
     }
 
-    private func writeRecord(to url: URL) async {
+    /// 换格式时同步文件名扩展：只替换 .csv/.json 尾缀，其他自定义名直接追加
+    private static func applyingExtension(_ name: String, ext: String) -> String {
+        let lower = name.lowercased()
+        guard lower.hasSuffix(".csv") || lower.hasSuffix(".json") else { return name + "." + ext }
+        return (name as NSString).deletingPathExtension + "." + ext
+    }
+
+    enum RecordFormat { case csv, json }
+
+    private func writeRecord(to url: URL, format: RecordFormat) async {
         let snapshot = await engine.exportSnapshot()
         do {
-            if url.pathExtension.lowercased() == "json" {
+            switch format {
+            case .json:
                 let data = try ScanRecordExporter.json(meta: snapshot.meta, summary: snapshot.summary,
                                                        cells: snapshot.cells, anomalies: snapshot.anomalies)
                 try data.write(to: url, options: .atomic)
-            } else {
+            case .csv:
                 let csv = ScanRecordExporter.csv(meta: snapshot.meta, summary: snapshot.summary,
-                                                 anomalies: snapshot.anomalies)
+                                                 cells: snapshot.cells, anomalies: snapshot.anomalies)
                 try csv.write(to: url, atomically: true, encoding: .utf8)
             }
             saveSuccessMessage = "检测记录已保存：\(url.lastPathComponent)"
@@ -528,5 +569,18 @@ final class AppState: ObservableObject {
     private func syncState() async {
         // AppState 已在 MainActor，await 回来后直接赋值即可
         scanState = await engine.state
+    }
+}
+
+/// 保存面板格式菜单的 target/action 转发（AppState 不是 NSObject，不能直接做 target）
+private final class FormatPopupHandler: NSObject {
+    private let onChange: (Int) -> Void
+
+    init(onChange: @escaping (Int) -> Void) {
+        self.onChange = onChange
+    }
+
+    @objc func selectionChanged(_ sender: NSPopUpButton) {
+        onChange(sender.indexOfSelectedItem)
     }
 }
