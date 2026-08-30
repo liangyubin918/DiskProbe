@@ -12,7 +12,7 @@ public enum HelperIdentifiers {
     public static let devicePathPattern = "^/dev/rdisk[0-9]+$"
     /// helper 版本。ping 回传用于识别"注册的是旧版 helper"（重新打包后未重装的典型症状）。
     /// 与 make_app.sh 里的 CFBundleShortVersionString 保持一致。
-    public static let helperVersion = "2.5"
+    public static let helperVersion = "2.6"
 }
 
 /// helper 暴露给 app 的接口（root 权限运行）
