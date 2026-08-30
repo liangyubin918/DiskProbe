@@ -24,7 +24,14 @@ enum DiskEnumerator {
         // 1) IOKit 枚举所有 IOMedia 对象
         guard let matching = IOServiceMatching(mediaClass) else { return [] }
         var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+        // kIOMainPortDefault 是 macOS 12+ 的别名，11 上用旧名
+        let mainPort: mach_port_t
+        if #available(macOS 12.0, *) {
+            mainPort = kIOMainPortDefault
+        } else {
+            mainPort = kIOMasterPortDefault
+        }
+        guard IOServiceGetMatchingServices(mainPort, matching, &iterator) == KERN_SUCCESS else {
             return []
         }
         defer { IOObjectRelease(iterator) }

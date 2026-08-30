@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- SMJobBless 路径（macOS 11/12）用：内嵌进 helper 二进制的 __TEXT/__launchd_plist 段，
+         SMJobBless 时被原样安装到 /Library/LaunchDaemons/。
+         注意：ProgramArguments 由系统在安装时自动写入标准位置，不能也不需要自己声明。 -->
+    <key>Label</key><string>local.diskprobe.helper</string>
+    <key>MachServices</key>
+    <dict>
+        <key>local.diskprobe.helper</key><true/>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- SMJobBless 路径（macOS 11/12）用：此 plist 通过链接参数内嵌进 helper
+         二进制的 __TEXT/__info_plist 段。CFBundleIdentifier 必须与 app 侧
+         SMPrivilegedExecutors 的 key、launchd Label 完全一致。 -->
+    <key>CFBundleIdentifier</key><string>local.diskprobe.helper</string>
+    <key>CFBundleName</key><string>DiskProbeHelper</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleVersion</key><string>2.7</string>
+    <key>CFBundleShortVersionString</key><string>2.7</string>
+    <!-- SMJobBless 要求：允许安装/升级本 helper 的客户端（app）签名要求。
+         不锁定 Team ID（静态文件无法按机器注入）；helper 在 XPC 层另行校验
+         客户端为同一签名团队 + app identifier，跨团队冒用由此兜底。 -->
+    <key>SMAuthorizedClients</key>
+    <array>
+        <string>identifier "local.diskprobe" and anchor apple generic</string>
+    </array>
+</dict>
+</plist>

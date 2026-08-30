@@ -41,7 +41,7 @@ struct ScanStatBar: View {
 
     @ViewBuilder private var healthVerdict: some View {
         if scannedTotal == 0 {
-            Text("等待扫描").font(.caption).foregroundStyle(.secondary)
+            Text("等待扫描").font(.caption).foregroundColor(.appSecondary)
         } else if statError > 0 {
             label("⚠️ 发现 \(statError) 个读取错误块", .red)
         } else if statAbnormal > 0 {
@@ -54,15 +54,15 @@ struct ScanStatBar: View {
     }
 
     private func label(_ text: String, _ color: Color) -> some View {
-        Text(text).font(.callout).bold().foregroundStyle(color)
+        Text(text).font(.callout.weight(.bold)).foregroundColor(color)
     }
 
     private func statItem(_ title: String, count: Int, color: Color) -> some View {
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(count)").font(.callout).monospacedDigit().bold()
-                Text(title).font(.caption2).foregroundStyle(.secondary)
+                Text("\(count)").font(.callout.monospacedDigit().weight(.bold))
+                Text(title).font(.caption2).foregroundColor(.appSecondary)
             }
         }
     }

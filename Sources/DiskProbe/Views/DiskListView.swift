@@ -15,17 +15,17 @@ struct DiskListView: View {
                 let others = appState.disks.filter { !$0.isExternalPhysical && !$0.isInternal }
 
                 if !external.isEmpty {
-                    Section("外置硬盘") {
+                    Section(header: Text("外置硬盘")) {
                         ForEach(external) { DiskRow(disk: $0) }
                     }
                 }
                 if !internal_.isEmpty {
-                    Section("内置硬盘") {
+                    Section(header: Text("内置硬盘")) {
                         ForEach(internal_) { DiskRow(disk: $0) }
                     }
                 }
                 if !others.isEmpty {
-                    Section("其他") {
+                    Section(header: Text("其他")) {
                         ForEach(others) { DiskRow(disk: $0) }
                     }
                 }
@@ -36,7 +36,7 @@ struct DiskListView: View {
                 Divider()
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("正在枚举磁盘…").font(.caption).foregroundStyle(.secondary)
+                    Text("正在枚举磁盘…").font(.caption).foregroundColor(.appSecondary)
                 }
                 .padding(.vertical, 6)
             }
@@ -52,7 +52,7 @@ private struct DiskRow: View {
         HStack(spacing: 10) {
             Image(systemName: disk.isExternalPhysical ? "externaldrive" : "internaldrive")
                 .font(.title3)
-                .foregroundStyle(disk.isExternalPhysical ? Color.accentColor : Color.secondary)
+                .foregroundColor(disk.isExternalPhysical ? .accentColor : .appSecondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(disk.displayName.isEmpty ? disk.bsdName : disk.displayName)
                     .font(.body)
@@ -63,7 +63,7 @@ private struct DiskRow: View {
                     Text("· /dev/\(disk.bsdName)")
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundColor(.appSecondary)
             }
             Spacer()
         }

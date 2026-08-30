@@ -12,7 +12,7 @@ import PackageDescription
 let package = Package(
     name: "DiskProbe",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v11)
     ],
     targets: [
         // 共享模型与协议
@@ -28,11 +28,22 @@ let package = Package(
             path: "Sources/DiskProbe"
         ),
 
-        // 特权 helper（SMAppService daemon，root 权限运行，只做只读扫描）
+        // 特权 helper（SMAppService daemon，root 权限运行，只做只读扫描）。
+        // macOS 11/12 走 SMJobBless，要求 helper 二进制内嵌 Info.plist 与
+        // launchd plist（链接参数写进 __TEXT 段）；13+ 的 SMAppService 忽略这些段。
         .executableTarget(
             name: "DiskProbeHelper",
             dependencies: ["DiskProbeCore"],
-            path: "Sources/DiskProbeHelper"
+            path: "Sources/DiskProbeHelper",
+            exclude: ["Helper-Info.plist", "Helper-Launchd.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/DiskProbeHelper/Helper-Info.plist",
+                    "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__launchd_plist",
+                    "-Xlinker", "Sources/DiskProbeHelper/Helper-Launchd.plist",
+                ])
+            ]
         ),
 
         .testTarget(

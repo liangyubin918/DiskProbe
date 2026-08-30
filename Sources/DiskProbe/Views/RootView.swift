@@ -17,10 +17,10 @@ struct RootView: View {
                 if let disk = appState.selectedDisk {
                     ScanPanelView(disk: disk)
                 } else {
-                    ContentUnavailableView(
-                        "未选择磁盘",
-                        systemImage: "externaldrive",
-                        description: Text("请从左侧选择要检测的磁盘")
+                    EmptyStateView(
+                        icon: "externaldrive",
+                        title: "未选择磁盘",
+                        message: "请从左侧选择要检测的磁盘"
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -34,6 +34,24 @@ struct RootView: View {
                     Label("刷新磁盘列表", systemImage: "arrow.clockwise")
                 }
             }
+        }
+    }
+}
+
+// MARK: - 空状态占位（ContentUnavailableView 的 macOS 11 等价实现）
+
+struct EmptyStateView: View {
+    let icon: String
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 44))
+                .foregroundColor(.appQuaternary)
+            Text(title).font(.headline)
+            Text(message).font(.callout).foregroundColor(.appSecondary)
         }
     }
 }

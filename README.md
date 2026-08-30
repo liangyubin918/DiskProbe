@@ -22,7 +22,8 @@ DiskProbe 是一款 macOS 原生硬盘坏道检测工具（对标 DiskGenius 的
 
 ## 系统要求
 
-- macOS 14 及以上；Universal 2 双架构（Apple Silicon 原生 + Intel），Intel 机型需能安装 macOS 14（大体是 2018 年末之后的 MacBook Air/Pro、Mac mini，2019 年及之后的 iMac/Mac Pro）
+- macOS 11（Big Sur）及以上；Universal 2 双架构（Apple Silicon 原生 + Intel）。Intel 机型为支持 macOS 11 的型号：MacBook 2015+、MacBook Air 2013+、MacBook Pro 2013 年末+、Mac mini 2014+、iMac 2014+、Mac Pro 2013 年末+
+- 特权助手安装：macOS 13+ 走 SMAppService，11/12 自动走 SMJobBless（对用户透明，都是点「安装特权助手」输管理员密码）
 - 签名证书：**不需要付费开发者账户**。安装 Xcode 并登录任意免费 Apple ID，钥匙串即自动获得 Apple Development 证书（免费证书 1 年有效，过期重新构建即可；iOS 上"7 天过期"的限制不适用于 macOS）
 - 特权助手必须真实签名（SMAppService 拒绝 ad-hoc），make_app.sh 会自动检测证书
 - `smartctl`（`brew install smartmontools`，仅 SMART 功能需要，没有也能扫描）
@@ -57,7 +58,7 @@ DiskProbe.app（用户权限，SwiftUI）
         ▲ XPC（audit token 校验调用方身份）
         ▼
 
-DiskProbeHelper（root 权限 launchd daemon，SMAppService 安装）
+DiskProbeHelper（root 权限 launchd daemon，SMAppService/SMJobBless 安装）
   └─ 逐块 pread 计时（O_RDONLY + F_NOCACHE），批次回传约 20 字节/块
 ```
 

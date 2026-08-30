@@ -13,16 +13,16 @@ struct SMARTSummaryBar: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Label("SMART", systemImage: "waveform.path.ecg")
-                    .font(.caption).bold()
-                    .foregroundStyle(.secondary)
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.appSecondary)
 
                 if appState.isReadingSMART {
                     ProgressView().controlSize(.mini)
-                    Text("读取中…").font(.caption).foregroundStyle(.secondary)
+                    Text("读取中…").font(.caption).foregroundColor(.appSecondary)
                 } else if let err = appState.smartError {
                     Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                    Text(err).font(.caption).foregroundStyle(.orange)
+                        .foregroundColor(.orange)
+                    Text(err).font(.caption).foregroundColor(.orange)
                     Button("重试") {
                         Task { await appState.refreshSMART() }
                     }
@@ -31,7 +31,7 @@ struct SMARTSummaryBar: View {
                 } else if let info = appState.smartInfo {
                     SMARTContent(info: info)
                 } else {
-                    Text("未读取").font(.caption).foregroundStyle(.secondary)
+                    Text("未读取").font(.caption).foregroundColor(.appSecondary)
                     Button("读取") {
                         Task { await appState.refreshSMART() }
                     }
@@ -43,9 +43,11 @@ struct SMARTSummaryBar: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 6)
-        .task(id: appState.selectedDisk?.id) {
-            // 切换磁盘时自动刷新
-            await appState.refreshSMART()
+        // 切换磁盘时自动刷新：.task(id:)（macOS 12+）的等价实现——
+        // 用 .id 改变视图身份触发 onAppear 重新执行
+        .id(appState.selectedDisk?.id)
+        .onAppear {
+            Task { await appState.refreshSMART() }
         }
     }
 }
@@ -88,7 +90,7 @@ private struct SMARTContent: View {
 
             // 型号（过长则省略）
             if let m = info.model, !m.isEmpty {
-                Text(m).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(m).font(.caption).foregroundColor(.appSecondary).lineLimit(1)
             }
         }
     }
@@ -99,15 +101,15 @@ private struct SMARTContent: View {
                 .fill(info.isHealthy == true ? .green : (info.isHealthy == false ? .red : .gray))
                 .frame(width: 8, height: 8)
             Text(info.isHealthy == true ? "健康" : (info.isHealthy == false ? "异常" : "未知"))
-                .font(.caption).bold()
-                .foregroundStyle(info.isHealthy == true ? .green : (info.isHealthy == false ? .red : .secondary))
+                .font(.caption.weight(.bold))
+                .foregroundColor(info.isHealthy == true ? .green : (info.isHealthy == false ? .red : .appSecondary))
         }
     }
 
     private func metric(_ label: String, _ value: String, _ color: Color) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.caption).bold().monospacedDigit().foregroundStyle(color)
+            Text(label).font(.caption2).foregroundColor(.appSecondary)
+            Text(value).font(.caption.monospacedDigit().weight(.bold)).foregroundColor(color)
         }
     }
 }

@@ -7,7 +7,8 @@ import AppKit
 ///   Resources/Donate-WeChat.png / Donate-Alipay.png
 /// 有几张展示几张（自适应居中）；都没有时显示占位提示。
 struct DonateSheet: View {
-    @Environment(\.dismiss) private var dismiss
+    // presentationMode 是 dismiss（macOS 12+）的 macOS 11 等价物
+    @Environment(\.presentationMode) private var presentationMode
 
     private let candidates: [(title: String, resource: String, tint: Color)] = [
         ("微信", "Donate-WeChat", .green),
@@ -24,9 +25,9 @@ struct DonateSheet: View {
         VStack(spacing: 18) {
             VStack(spacing: 6) {
                 Text("如果 DiskProbe 帮到了你")
-                    .font(.title3).bold()
+                    .font(.title3.weight(.bold))
                 Text("扫码请作者喝杯咖啡")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(.callout).foregroundColor(.appSecondary)
             }
 
             if cards.isEmpty {
@@ -36,7 +37,7 @@ struct DonateSheet: View {
                     Text("收款码待放置")
                         .font(.caption)
                 }
-                .foregroundStyle(.tertiary)
+                .foregroundColor(.appTertiary)
                 .frame(width: 420, height: 220)
             } else {
                 HStack(spacing: 28) {
@@ -46,20 +47,20 @@ struct DonateSheet: View {
                                 .resizable().scaledToFit()
                                 .frame(width: 200, height: 200)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
-                            Text(card.title).font(.callout).bold().foregroundStyle(card.tint)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.appSeparator))
+                            Text(card.title).font(.callout.weight(.bold)).foregroundColor(card.tint)
                         }
                         .padding(12)
-                        .background(Color(nsColor: .textBackgroundColor).opacity(0.5),
-                                    in: RoundedRectangle(cornerRadius: 12))
+                        .background(RoundedRectangle(cornerRadius: 12)
+                            .fill(Color(NSColor.textBackgroundColor).opacity(0.5)))
                     }
                 }
             }
 
             Text("金额随意，心意最重要")
-                .font(.caption).foregroundStyle(.tertiary)
+                .font(.caption).foregroundColor(.appTertiary)
 
-            Button("关闭") { dismiss() }
+            Button("关闭") { presentationMode.wrappedValue.dismiss() }
                 .keyboardShortcut(.defaultAction)
         }
         .padding(28)

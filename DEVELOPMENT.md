@@ -23,7 +23,7 @@ DiskProbe.app（用户权限）
   │                      （AsyncStream 用 bufferingNewest(1)，丢事件不丢正确性）
   └─ RealScanSession     XPC 客户端（begin 的 pendingAck 只能 resume 一次）
 
-DiskProbeHelper（root daemon，SMAppService 安装）
+DiskProbeHelper（root daemon，macOS 13+ SMAppService / 11/12 SMJobBless 安装）
   ├─ NSXPCListener(machServiceName:) —— 勿用 .service()，daemon 环境会 SIGTRAP
   ├─ audit token 校验调用方（KVC 取出后用 NSValue.getValue 拷字节，勿 as? C 结构体）
   ├─ 设备白名单 ^/dev/rdisk[0-9]+$、lstat 拒符号链接、O_RDONLY

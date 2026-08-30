@@ -11,6 +11,9 @@ import DiskProbeCore
 ///   - 悬停：显示格子编号、块编号与采样耗时
 ///   - 触控板二指滑动 / 滚轮：平移（本地事件监听，不遮挡任何 SwiftUI 手势）
 ///   - 双指捏合 / +- 按钮：缩放（1×–16×）；鼠标拖动平移；双击：复位
+///
+/// macOS 11 兼容说明：原实现依赖 Canvas / onContinuousHover / onChange（12+/14+），
+/// 现统一改为 Path 绘制 + NSView 追踪区 + 布局回调，所有系统版本共用一条代码路径。
 struct ScanMapView: View {
     @EnvironmentObject var appState: AppState
 
@@ -23,7 +26,7 @@ struct ScanMapView: View {
     @State private var lastCursor: CGPoint? = nil   // 最后光标位置（画布局部坐标）
     @State private var canvasSize: CGSize = .zero
 
-    // 二指滚动平移：透明 NSView 仅用于标定地图区域的窗口坐标；
+    // 二指滚动平移：宿主 NSView 仅用于标定地图区域的窗口坐标；
     // scrollWheel 事件由本地监听器截获，事件不经过它，因此不遮挡 SwiftUI 手势
     private final class ScrollRegionRef {
         weak var view: NSView?
@@ -39,27 +42,28 @@ struct ScanMapView: View {
 
             GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
-                    // 地图区域标定（窗口坐标），供二指滑动平移使用
-                    ScrollRegionCatcher { scrollRegion.view = $0 }
-                        .frame(width: geo.size.width, height: geo.size.height)
-
-                    Canvas { ctx, size in
-                        drawCells(ctx: ctx, size: size)
-                    }
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
-                    .contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let p): updateHover(at: p, size: geo.size)
-                        case .ended: hover = nil
-                        @unknown default: break
+                    // 地图区域宿主：窗口坐标标定（二指平移用）+ 悬停追踪 + 尺寸回调
+                    MapHostView(
+                        onAttach: { scrollRegion.view = $0 },
+                        onResize: { canvasSize = $0 },
+                        onHoverMoved: { point in
+                            if let point = point {
+                                updateHover(at: point, size: geo.size)
+                            } else {
+                                hover = nil
+                            }
                         }
-                    }
-                    .gesture(dragGesture(size: geo.size))
-                    .simultaneousGesture(magnifyGesture(size: geo.size))
-                    .onTapGesture(count: 2) { resetView(size: geo.size) }
+                    )
+                    .frame(width: geo.size.width, height: geo.size.height)
+
+                    mapCellsView(size: geo.size)
+                        .background(Color(NSColor.textBackgroundColor).opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appSeparator))
+                        .contentShape(Rectangle())
+                        .gesture(dragGesture(size: geo.size))
+                        .simultaneousGesture(magnifyGesture(size: geo.size))
+                        .onTapGesture(count: 2) { resetView(size: geo.size) }
 
                     if let h = hover, let cell = cell(at: h.index) {
                         hoverTooltip(cell: cell, index: h.index)
@@ -73,7 +77,7 @@ struct ScanMapView: View {
                             Image(systemName: "minus.magnifyingglass")
                         }
                         Text("\(Int((zoom * 100).rounded()))%")
-                            .font(.caption).monospacedDigit()
+                            .font(.caption.monospacedDigit())
                             .frame(minWidth: 40)
                         Button { stepZoom(1, size: geo.size) } label: {
                             Image(systemName: "plus.magnifyingglass")
@@ -85,19 +89,83 @@ struct ScanMapView: View {
                     .buttonStyle(.borderless)
                     .font(.callout)
                     .padding(.horizontal, 8).padding(.vertical, 5)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
+                    .background(BlurBackground(cornerRadius: 8))
                     .padding(8)
                     .help("双指滑动平移，捏合或加减缩放，双击复位")
                 }
-                .onAppear { canvasSize = geo.size; installScrollPan() }
-                .onChange(of: geo.size) { canvasSize = geo.size }
+                .onAppear { installScrollPan() }
                 .onDisappear { removeScrollPan() }
             }
             .frame(minHeight: 220)
 
             legend
         }
+    }
+
+    // MARK: 地图绘制（Path 版，Canvas 的 macOS 11 等价实现）
+
+    /// 按状态分组构建路径，应用视图变换后逐层填充。
+    /// Path 先在"内容坐标系"里构建（与旧 Canvas 相同的坐标），再 applying 变换，
+    /// 因此描边线宽保持屏幕恒定（旧实现用 lineWidth 2/zoom 达到同样效果）。
+    private func mapCellsView(size: CGSize) -> some View {
+        let transform = viewTransform(size: size)
+        return ZStack {
+            ForEach(statusPaths(size: size, transform: transform)) { group in
+                group.path.fill(group.color)
+            }
+            if let h = hover {
+                hoverOutline(index: h.index, size: size)
+                    .stroke(Color.white.opacity(0.85), lineWidth: 2)
+            }
+        }
+    }
+
+    private struct StatusPath: Identifiable {
+        let status: BlockStatus
+        let path: Path
+        let color: Color
+        var id: BlockStatus { status }
+    }
+
+    private func statusPaths(size: CGSize, transform: CGAffineTransform) -> [StatusPath] {
+        let cells = appState.mapCells
+        let cols = appState.mapColumns
+        guard !cells.isEmpty, cols > 0 else { return [] }
+        let rows = (cells.count + cols - 1) / cols
+        let cw = size.width / CGFloat(cols)
+        let ch = size.height / CGFloat(rows)
+        // DiskGenius 式格间隙（内容坐标系，放大时可见）
+        let gap = min(2.0, max(0.5, cw * 0.10))
+        let corner = min(1.5, gap / 2)
+
+        var grouped: [BlockStatus: Path] = [:]
+        for (i, cell) in cells.enumerated() {
+            let row = i / cols, col = i % cols
+            let rect = CGRect(x: CGFloat(col) * cw + gap / 2, y: CGFloat(row) * ch + gap / 2,
+                              width: cw - gap, height: ch - gap)
+            grouped[cell.status, default: Path()]
+                .addRoundedRect(in: rect, cornerSize: CGSize(width: corner, height: corner))
+        }
+
+        // 固定按 BlockStatus 顺序输出，保证 ForEach 身份稳定
+        return BlockStatus.allCases.compactMap { status in
+            guard var path = grouped[status] else { return nil }
+            path = path.applying(transform)
+            return StatusPath(status: status, path: path, color: statusColor(status))
+        }
+    }
+
+    /// 悬停格高亮描边（线宽不随缩放变化）
+    private func hoverOutline(index: Int, size: CGSize) -> Path {
+        let cols = appState.mapColumns
+        let total = appState.mapCells.count
+        guard cols > 0, total > 0 else { return Path() }
+        let rows = (total + cols - 1) / cols
+        let cw = size.width / CGFloat(cols)
+        let ch = size.height / CGFloat(rows)
+        let row = index / cols, col = index % cols
+        let rect = CGRect(x: CGFloat(col) * cw, y: CGFloat(row) * ch, width: cw, height: ch)
+        return Path(rect).applying(viewTransform(size: size))
     }
 
     // MARK: 视图变换
@@ -158,20 +226,64 @@ struct ScanMapView: View {
         refreshHover()
     }
 
-    // MARK: 二指滑动 / 滚轮平移
+    // MARK: 二指滑动 / 滚轮平移 + 悬停追踪宿主
 
-    private struct ScrollRegionCatcher: NSViewRepresentable {
-        let onView: (NSView) -> Void
-        func makeNSView(context: Context) -> NSView {
-            let v = NSView()
-            onView(v)
+    /// 地图区域宿主 NSView，负责三件依赖"自身几何"的事：
+    ///   1. 给二指滚动平移提供窗口坐标标定
+    ///   2. 追踪区上报鼠标移动（onContinuousHover 的 macOS 11 等价实现）
+    ///   3. 尺寸变化回调（onChange(of: geo.size) 的 macOS 11 等价实现）
+    private struct MapHostView: NSViewRepresentable {
+        let onAttach: (NSView) -> Void
+        let onResize: (CGSize) -> Void
+        let onHoverMoved: (CGPoint?) -> Void
+
+        func makeNSView(context: Context) -> MapHostNSView {
+            let v = MapHostNSView()
+            onAttach(v)
+            v.onResize = onResize
+            v.onHoverMoved = onHoverMoved
             return v
         }
-        func updateNSView(_ nsView: NSView, context: Context) { onView(nsView) }
+        func updateNSView(_ nsView: MapHostNSView, context: Context) {
+            nsView.onResize = onResize
+            nsView.onHoverMoved = onHoverMoved
+        }
+    }
+
+    private final class MapHostNSView: NSView {
+        var onResize: ((CGSize) -> Void)? = nil
+        var onHoverMoved: ((CGPoint?) -> Void)? = nil
+
+        // SwiftUI 内容左上角为原点，翻转坐标系保持一致
+        override var isFlipped: Bool { true }
+
+        override func layout() {
+            super.layout()
+            onResize?(bounds.size)
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            onHoverMoved?(convert(event.locationInWindow, from: nil))
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            onHoverMoved?(nil)
+        }
     }
 
     /// 本地监听 scrollWheel：光标在地图区域内且已放大时截获用于平移，
-    /// 其余事件原样放行。透明 NSView 只提供命中范围，不参与事件分发，
+    /// 其余事件原样放行。宿主 NSView 只提供命中范围，不参与事件分发，
     /// 因此悬停 / 捏合 / 拖动 / 双击等 SwiftUI 手势完全不受影响。
     private func installScrollPan() {
         guard scrollMonitor == nil else { return }
@@ -229,22 +341,21 @@ struct ScanMapView: View {
     @ViewBuilder private func hoverTooltip(cell: MapCell, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("格子 #\(index)")
-                .font(.caption).bold().monospacedDigit()
+                .font(.caption.monospacedDigit().weight(.bold))
             if cell.blockIndex >= 0 {
                 Text("块 #\(cell.blockIndex)")
-                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                    .font(.caption2.monospacedDigit()).foregroundColor(.appSecondary)
                 HStack(spacing: 4) {
                     Circle().fill(statusColor(cell.status)).frame(width: 7, height: 7)
                     Text("\(String(format: "%.1f", cell.elapsedMs)) ms · \(cell.status.rawValue)")
-                        .font(.caption2).monospacedDigit()
+                        .font(.caption2.monospacedDigit())
                 }
             } else {
-                Text("未扫描").font(.caption2).foregroundStyle(.secondary)
+                Text("未扫描").font(.caption2).foregroundColor(.appSecondary)
             }
         }
         .padding(7)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.separator))
+        .background(BlurBackground(cornerRadius: 7))
         .fixedSize()
         .allowsHitTesting(false)
         .transition(.opacity)
@@ -256,35 +367,36 @@ struct ScanMapView: View {
         if let p = appState.progress {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("进度").font(.caption).foregroundStyle(.secondary)
-                    Text(String(format: "%.2f%%", p.fraction * 100)).font(.title3).monospacedDigit().bold()
+                    Text("进度").font(.caption).foregroundColor(.appSecondary)
+                    Text(String(format: "%.2f%%", p.fraction * 100))
+                        .font(.title3.monospacedDigit().weight(.bold))
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("速度").font(.caption).foregroundStyle(.secondary)
-                    Text(String(format: "%.1f MB/s", p.speedMBps)).font(.callout).monospacedDigit()
+                    Text("速度").font(.caption).foregroundColor(.appSecondary)
+                    Text(String(format: "%.1f MB/s", p.speedMBps)).font(.callout.monospacedDigit())
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("已用").font(.caption).foregroundStyle(.secondary)
-                    Text(formatDuration(p.elapsedSeconds)).font(.callout).monospacedDigit()
+                    Text("已用").font(.caption).foregroundColor(.appSecondary)
+                    Text(formatDuration(p.elapsedSeconds)).font(.callout.monospacedDigit())
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("预计剩余").font(.caption).foregroundStyle(.secondary)
-                    Text(formatDuration(p.etaSeconds)).font(.callout).monospacedDigit()
+                    Text("预计剩余").font(.caption).foregroundColor(.appSecondary)
+                    Text(formatDuration(p.etaSeconds)).font(.callout.monospacedDigit())
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("当前位置").font(.caption).foregroundStyle(.secondary)
-                    Text(byteOffset(p.lastBlock.startOffset)).font(.caption).monospacedDigit()
+                    Text("当前位置").font(.caption).foregroundColor(.appSecondary)
+                    Text(byteOffset(p.lastBlock.startOffset)).font(.caption.monospacedDigit())
                 }
             }
-            ProgressView(value: p.fraction).tint(progressTint)
+            ProgressView(value: p.fraction).accentColor(progressTint)
         } else {
             HStack {
                 Image(systemName: "rectangle.grid.3x3")
                 let idleLike = appState.scanState == .idle || appState.scanState == .stopped
                     || appState.scanState == .error || appState.scanState == .finished
                 Text(idleLike ? "点击「开始扫描」开始检测" : "准备中…")
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.appSecondary)
                 Spacer()
             }
             .font(.callout)
@@ -306,38 +418,7 @@ struct ScanMapView: View {
             }
             Spacer()
             Text("悬停查看格子详情，双指滑动平移，捏合缩放，双击复位")
-                .font(.caption2).foregroundStyle(.tertiary)
-        }
-    }
-
-    // MARK: Canvas 绘制
-
-    private func drawCells(ctx ctxIn: GraphicsContext, size: CGSize) {
-        var ctx = ctxIn
-        let cells = appState.mapCells
-        let cols = appState.mapColumns
-        guard !cells.isEmpty, cols > 0 else { return }
-        let rows = (cells.count + cols - 1) / cols
-        let cw = size.width / CGFloat(cols)
-        let ch = size.height / CGFloat(rows)
-        // DiskGenius 式格间隙（内容坐标系，放大时可见）
-        let gap = min(2.0, max(0.5, cw * 0.10))
-
-        ctx.concatenate(viewTransform(size: size))
-
-        for (i, cell) in cells.enumerated() {
-            let row = i / cols, col = i % cols
-            let rect = CGRect(x: CGFloat(col) * cw + gap / 2, y: CGFloat(row) * ch + gap / 2,
-                              width: cw - gap, height: ch - gap)
-            ctx.fill(Path(roundedRect: rect, cornerRadius: min(1.5, gap / 2)),
-                     with: .color(statusColor(cell.status)))
-        }
-
-        // 悬停格高亮描边（线宽除以 zoom 保持屏幕恒定）
-        if let h = hover {
-            let row = h.index / cols, col = h.index % cols
-            let rect = CGRect(x: CGFloat(col) * cw, y: CGFloat(row) * ch, width: cw, height: ch)
-            ctx.stroke(Path(rect), with: .color(.white.opacity(0.85)), lineWidth: 2 / zoom)
+                .font(.caption2).foregroundColor(.appTertiary)
         }
     }
 
@@ -375,5 +456,5 @@ struct ScanMapView: View {
 
 enum StatusPalette {
     static let errorDark   = Color(red: 0.55, green: 0.0, blue: 0.0)
-    static let unscanned   = Color(nsColor: .tertiaryLabelColor).opacity(0.35)
+    static let unscanned   = Color(NSColor.tertiaryLabelColor).opacity(0.35)
 }

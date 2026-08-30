@@ -49,7 +49,8 @@ mkdir -p "$APP_BUNDLE/Contents/Library/LaunchServices"
 mkdir -p "$APP_BUNDLE/Contents/Library/LaunchDaemons"
 
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
-cp "$BUILD_DIR/$HELPER_NAME" "$APP_BUNDLE/Contents/Library/LaunchServices/"
+# SMJobBless（macOS 11/12）硬性要求：helper 文件名 = launchd label
+cp "$BUILD_DIR/$HELPER_NAME" "$APP_BUNDLE/Contents/Library/LaunchServices/local.diskprobe.helper"
 
 # Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
@@ -60,15 +61,23 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>DiskProbe</string>
     <key>CFBundleIdentifier</key><string>local.diskprobe</string>
-    <key>CFBundleVersion</key><string>2.6</string>
-    <key>CFBundleShortVersionString</key><string>2.6</string>
+    <key>CFBundleVersion</key><string>2.7</string>
+    <key>CFBundleShortVersionString</key><string>2.7</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>LSUIElement</key><false/>
+    <!-- SMJobBless（macOS 11/12）要求：声明本 app 拥有的特权 helper。
+         值是 helper 必须满足的签名要求串；与 helper 内嵌 SMAuthorizedClients
+         （校验客户端 app）方向相反、互为镜像。13+ 的 SMAppService 不读此键。 -->
+    <key>SMPrivilegedExecutables</key>
+    <dict>
+        <key>local.diskprobe.helper</key>
+        <string>identifier "local.diskprobe.helper" and anchor apple generic</string>
+    </dict>
 </dict>
 </plist>
 PLIST
@@ -80,7 +89,7 @@ cat > "$APP_BUNDLE/Contents/Library/LaunchDaemons/local.diskprobe.helper.plist" 
 <plist version="1.0">
 <dict>
     <key>Label</key><string>local.diskprobe.helper</string>
-    <key>BundleProgram</key><string>Contents/Library/LaunchServices/$HELPER_NAME</string>
+    <key>BundleProgram</key><string>Contents/Library/LaunchServices/local.diskprobe.helper</string>
     <key>MachServices</key>
     <dict>
         <key>local.diskprobe.helper</key><true/>
@@ -120,7 +129,7 @@ echo "==> 4/5 签名..."
 if [ "$SIGN_MODE" = "real" ]; then
     # 先签 helper，再签 app（外层签名会封存内层）
     codesign --force --sign "$IDENTITY" --timestamp=none \
-        --identifier local.diskprobe.helper "$APP_BUNDLE/Contents/Library/LaunchServices/$HELPER_NAME"
+        --identifier local.diskprobe.helper "$APP_BUNDLE/Contents/Library/LaunchServices/local.diskprobe.helper"
     codesign --force --sign "$IDENTITY" --timestamp=none \
         --identifier local.diskprobe "$APP_BUNDLE"
 else

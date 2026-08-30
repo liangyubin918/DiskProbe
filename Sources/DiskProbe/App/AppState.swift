@@ -7,7 +7,16 @@ import DiskProbeCore
 
 // MARK: - 特权助手端到端健康状态
 
-/// SMAppService 的 .enabled 只表示"已注册"；重新打包后注册过期时
+/// 安装状态（自有枚举，屏蔽双路径差异）：
+///   macOS 13+ 走 SMAppService；11/12 走 SMJobBless（见 LegacyHelperInstaller）
+enum HelperInstallStatus: Equatable {
+    case registered         // 已注册/已安装
+    case requiresApproval   // macOS 13+：等待用户在系统设置批准
+    case notInstalled
+    case notFound           // macOS 13+：从非 .app 环境启动等找不到 bundle 的情况
+}
+
+/// .registered 只表示"已注册"；重新打包后注册过期时
 /// daemon 实际 spawn 失败。此枚举用 ping 结果区分真实可用性。
 enum HelperHealth: Equatable {
     case checking                       // ping 进行中
@@ -53,8 +62,8 @@ final class AppState: ObservableObject {
     @Published var progress: ScanProgress? = nil
     @Published var scanState: ScanState = .idle
 
-    // 特权助手（SMAppService daemon）
-    @Published var helperStatus: SMAppService.Status = .notRegistered
+    // 特权助手（13+ 用 SMAppService daemon，11/12 用 SMJobBless）
+    @Published var helperStatus: HelperInstallStatus = .notInstalled
     /// 端到端健康：ping 通且版本匹配才算就绪。status=.enabled 只代表"已注册"，
     /// 重新打包后注册过期时 daemon 实际起不来，必须用 ping 区分。
     @Published var helperHealth: HelperHealth = .checking
@@ -64,8 +73,24 @@ final class AppState: ObservableObject {
     @Published var helperOpError: String? = nil
     private var pingGeneration = 0
 
-    private var helperService: SMAppService {
+    @available(macOS 13.0, *)
+    private var modernService: SMAppService {
         .daemon(plistName: HelperIdentifiers.launchdPlistName)
+    }
+
+    /// 读取当前安装状态：13+ 查 SMAppService，11/12 查 SMJobBless 落地文件
+    private func currentInstallStatus() -> HelperInstallStatus {
+        if #available(macOS 13.0, *) {
+            switch modernService.status {
+            case .enabled:           return .registered
+            case .requiresApproval:  return .requiresApproval
+            case .notRegistered:     return .notInstalled
+            case .notFound:          return .notFound
+            @unknown default:        return .notInstalled
+            }
+        } else {
+            return LegacyHelperInstaller.isInstalled ? .registered : .notInstalled
+        }
     }
 
     // 扫描错误提示
@@ -95,7 +120,7 @@ final class AppState: ObservableObject {
 
     init() {
         Task { await refreshDisks() }
-        helperStatus = helperService.status
+        helperStatus = currentInstallStatus()
         // 无头模式：`open DiskProbe.app --args --register-helper` 注册完自动退出，
         // 用于脚本化安装/诊断（与点击"安装特权助手"完全同一条代码路径）
         if CommandLine.arguments.contains("--register-helper") {
@@ -117,14 +142,14 @@ final class AppState: ObservableObject {
     // MARK: 特权助手
 
     func refreshHelperStatus() {
-        helperStatus = helperService.status
+        helperStatus = currentInstallStatus()
         refreshHelperHealth()
     }
 
     /// 已注册时用 ping 验证 daemon 真的能启动、且不是旧版本残留。
     /// 带代数序号：连续刷新时只有最后一次的 ping 结果生效。
     private func refreshHelperHealth() {
-        guard helperStatus == .enabled else {
+        guard helperStatus == .registered else {
             helperHealth = .checking
             return
         }
@@ -133,7 +158,7 @@ final class AppState: ObservableObject {
         helperHealth = .checking
         Task {
             let version = await RealScanSession.ping()
-            guard gen == self.pingGeneration, self.helperStatus == .enabled else { return }
+            guard gen == self.pingGeneration, self.helperStatus == .registered else { return }
             switch version {
             case .some(let v) where v == "DiskProbeHelper \(HelperIdentifiers.helperVersion)":
                 self.helperHealth = .ready
@@ -150,12 +175,20 @@ final class AppState: ObservableObject {
         runHelperOperation(reinstall: false)
     }
 
-    /// 重装特权助手：先注销旧注册再重新注册。
+    /// 重装特权助手：先卸载旧注册再重新安装。
     /// app bundle 被替换后（重新打包/移动位置），launchd/BTM 缓存的旧注册会
     /// 反复 spawn 失败（launchctl 显示 last exit code = 78 EX_CONFIG），
     /// 表现为扫描时"特权助手未确认启动"。重装是唯一治本手段。
     func reinstallHelper() {
         runHelperOperation(reinstall: true)
+    }
+
+    /// 安装/重装操作的结构化结果（双路径共用）
+    private struct HelperOpOutcome {
+        var ok: Bool
+        var unregisterError: String?
+        var registerError: String?
+        var attempts: Int
     }
 
     private func runHelperOperation(reinstall: Bool) {
@@ -164,44 +197,26 @@ final class AppState: ObservableObject {
         helperOpError = nil
         authError = nil
 
-        let service = helperService
         Task {
-            // register()/unregister() 是同步阻塞调用（等用户输密码可能数秒），
+            // 安装调用是同步阻塞的（等用户输密码可能数秒），
             // 必须放后台线程，否则管理员确认期间整个 UI 冻结
-            let outcome: (ok: Bool, unregisterError: String?, registerError: String?, registerAttempts: Int) =
+            let outcome: HelperOpOutcome =
                 await Task.detached(priority: .userInitiated) {
-                    var unregisterError: String? = nil
-                    if reinstall {
-                        do { try await service.unregister() }
-                        catch { unregisterError = Self.describe(error) }
+                    if #available(macOS 13.0, *) {
+                        return await Self.runModernOperation(reinstall: reinstall)
+                    } else {
+                        return Self.runLegacyOperation(reinstall: reinstall)
                     }
-                    var registerError: String? = nil
-                    var attempts = 0
-                    // BTM 数据库在注销/注册之间偶有传播延迟，失败后短暂等待重试一次
-                    for wait in [0, 1_500_000_000] {
-                        if attempts > 0 {
-                            try? await Task.sleep(nanoseconds: UInt64(wait))
-                        }
-                        attempts += 1
-                        do {
-                            try service.register()
-                            registerError = nil
-                            break
-                        } catch {
-                            registerError = Self.describe(error)
-                        }
-                    }
-                    return (registerError == nil, unregisterError, registerError, attempts)
                 }.value
 
-            helperStatus = helperService.status
+            helperStatus = currentInstallStatus()
             refreshHelperHealth()
             helperOpInProgress = false
 
             appendDiag("""
             === \(reinstall ? "重装" : "安装")特权助手 ===
             unregisterError: \(outcome.unregisterError ?? "无")
-            registerError(尝试 \(outcome.registerAttempts) 次): \(outcome.registerError ?? "无")
+            registerError(尝试 \(outcome.attempts) 次): \(outcome.registerError ?? "无")
             最终 status: \(helperStatus)  health: \(helperHealth)
             """)
 
@@ -216,13 +231,73 @@ final class AppState: ObservableObject {
                 let detail = outcome.registerError ?? "未知错误"
                 if detail.contains("取消") {
                     helperOpError = "已取消，特权助手未做更改。"
-                } else if helperStatus == .enabled {
+                } else if helperStatus == .registered {
                     helperOpError = "注册更新失败（\(detail)），当前仍是旧注册。请再试一次重装。"
                 } else {
                     helperOpError = "\(reinstall ? "重装" : "安装")特权助手失败：\(detail)"
                 }
             }
         }
+    }
+
+    /// macOS 13+：SMAppService 注册/注销。
+    /// register()/unregister() 是同步阻塞调用，只能跑在后台线程。
+    @available(macOS 13.0, *)
+    private nonisolated static func runModernOperation(reinstall: Bool) async -> HelperOpOutcome {
+        let service = SMAppService.daemon(plistName: HelperIdentifiers.launchdPlistName)
+
+        var unregisterError: String? = nil
+        if reinstall {
+            do { try await service.unregister() }
+            catch { unregisterError = describe(error) }
+        }
+        // 迁移清理：从 macOS 11/12 升级上来的用户可能残留 SMJobBless 装的旧 helper，
+        // 同名 launchd label 会与 SMAppService daemon 冲突（EX_CONFIG），先移除。
+        // 只在用户主动安装/重装（已有密码弹窗预期）时执行，避免凭空弹授权框。
+        if LegacyHelperInstaller.isInstalled {
+            if let msg = LegacyHelperInstaller.remove() {
+                unregisterError = unregisterError ?? "旧版 helper 清理失败：\(msg)"
+            }
+        }
+
+        var registerError: String? = nil
+        var attempts = 0
+        // BTM 数据库在注销/注册之间偶有传播延迟，失败后短暂等待重试一次
+        for wait in [0, 1_500_000_000] {
+            if attempts > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(wait))
+            }
+            attempts += 1
+            do {
+                try service.register()
+                registerError = nil
+                break
+            } catch {
+                registerError = describe(error)
+            }
+        }
+        return HelperOpOutcome(ok: registerError == nil,
+                               unregisterError: unregisterError,
+                               registerError: registerError,
+                               attempts: attempts)
+    }
+
+    /// macOS 11/12：SMJobBless 安装/卸载（同步调用，同样只跑后台线程）
+    private nonisolated static func runLegacyOperation(reinstall: Bool) -> HelperOpOutcome {
+        var unregisterError: String? = nil
+        if reinstall {
+            if let msg = LegacyHelperInstaller.remove() {
+                unregisterError = msg
+            }
+        }
+        var registerError: String? = nil
+        if let msg = LegacyHelperInstaller.install() {
+            registerError = msg
+        }
+        return HelperOpOutcome(ok: registerError == nil,
+                               unregisterError: unregisterError,
+                               registerError: registerError,
+                               attempts: 1)
     }
 
     // MARK: 诊断日志
@@ -375,7 +450,7 @@ final class AppState: ObservableObject {
         listenerTask?.cancel()
         listenerTask = Task {
             refreshHelperStatus()
-            guard helperStatus == .enabled else {
+            guard helperStatus == .registered else {
                 authError = "真实扫描需要先安装特权助手（含 root 授权）。若已安装仍失败，请点「重装特权助手」。"
                 await syncState()
                 return
