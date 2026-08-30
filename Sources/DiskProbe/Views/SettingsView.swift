@@ -2,6 +2,10 @@ import SwiftUI
 import DiskProbeCore
 
 // MARK: - 设置窗口：阈值调整（Cmd+, 唤起）
+//
+// 不用 Form/Section：macOS 15 起 Settings 场景里的 Form 会按理想宽度排版内容列，
+// 长文案把表单撑到远超窗口宽度，内容整体溢出窗口两侧被裁（GitHub issue #2）。
+// 这里手工排版（标题 + 标签/控件行 + 说明），各系统版本渲染一致。
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -20,53 +24,46 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        Form {
-            Section(header: Text("扫描阈值（毫秒）")) {
-                HStack {
-                    Text("警告阈值")
-                    Spacer()
-                    TextField("", text: $warnText, onCommit: commit)
-                        .frame(width: 80)
-                }
-                HStack {
-                    Text("异常阈值")
-                    Spacer()
-                    TextField("", text: $abnormalText, onCommit: commit)
-                        .frame(width: 80)
-                }
-                Text("读取耗时 ≥ 警告阈值标记为黄色；≥ 异常阈值标记为红色；读取失败标记为错误。")
-                    .font(.caption).foregroundColor(.appSecondary)
+        VStack(alignment: .leading, spacing: 0) {
+            sectionHeader("扫描阈值（毫秒）")
+            keyValueRow("警告阈值") {
+                TextField("", text: $warnText, onCommit: commit)
+                    .frame(width: 80)
             }
-            Section(header: Text("特权助手")) {
-                HStack {
-                    Text("状态")
-                    Spacer()
-                    switch appState.helperStatus {
-                    case .registered: Text("已注册").foregroundColor(.green)
-                    case .requiresApproval: Text("待系统设置批准").foregroundColor(.orange)
-                    case .notInstalled: Text("未安装")
-                    case .notFound: Text("未找到（请从 .app 启动）")
-                    }
-                }
-                Button("重装特权助手（疑难修复）") { appState.reinstallHelper() }
-                Text("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。")
-                    .font(.caption).foregroundColor(.appSecondary)
+            keyValueRow("异常阈值") {
+                TextField("", text: $abnormalText, onCommit: commit)
+                    .frame(width: 80)
             }
-            Section(header: Text("支持作者")) {
-                Button {
-                    showDonate = true
-                } label: {
-                    Label("赞赏作者", systemImage: "heart.fill")
-                        .foregroundColor(.pink)
-                }
-                Text("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。")
-                    .font(.caption).foregroundColor(.appSecondary)
-                HStack {
-                    Text("DiskProbe v\(appVersion)")
-                        .font(.caption2.monospacedDigit()).foregroundColor(.appTertiary)
-                    Spacer()
+            caption("读取耗时 ≥ 警告阈值标记为黄色；≥ 异常阈值标记为红色；读取失败标记为错误。")
+
+            sectionDivider
+
+            sectionHeader("特权助手")
+            keyValueRow("状态") {
+                switch appState.helperStatus {
+                case .registered: Text("已注册").foregroundColor(.green)
+                case .requiresApproval: Text("待系统设置批准").foregroundColor(.orange)
+                case .notInstalled: Text("未安装")
+                case .notFound: Text("未找到（请从 .app 启动）")
                 }
             }
+            Button("重装特权助手（疑难修复）") { appState.reinstallHelper() }
+                .padding(.bottom, 10)
+            caption("重新打包或移动 app 后注册会失效，届时扫描面板会出现重装入口；此处是备用通道。")
+
+            sectionDivider
+
+            sectionHeader("支持作者")
+            Button {
+                showDonate = true
+            } label: {
+                Label("赞赏作者", systemImage: "heart.fill")
+                    .foregroundColor(.pink)
+            }
+            .padding(.bottom, 10)
+            caption("DiskProbe 完全免费。如果它帮你找回了数据或排查了问题，欢迎请作者喝杯咖啡。")
+            Text("DiskProbe v\(appVersion)")
+                .font(.caption2.monospacedDigit()).foregroundColor(.appTertiary)
         }
         .padding(20)
         .frame(width: 420)
@@ -81,6 +78,38 @@ struct SettingsView: View {
             warnText = String(format: "%.0f", thresholdWarnMs)
             abnormalText = String(format: "%.0f", thresholdAbnormalMs)
         }
+    }
+
+    // MARK: 排版组件
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.callout.weight(.semibold))
+            .padding(.bottom, 10)
+    }
+
+    private func keyValueRow<Content: View>(_ label: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            content()
+        }
+        .padding(.bottom, 10)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption).foregroundColor(.appSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.bottom, 4)
+    }
+
+    private var sectionDivider: some View {
+        Rectangle()
+            .fill(Color.appSeparator)
+            .frame(height: 1)
+            .padding(.vertical, 12)
     }
 
     private func commit() {
