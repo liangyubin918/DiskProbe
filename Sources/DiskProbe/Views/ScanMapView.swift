@@ -90,9 +90,10 @@ struct ScanMapView: View {
                     .font(.callout)
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(BlurBackground(cornerRadius: 8))
-                    .padding(8)
                     .help(tr("双指滑动平移，捏合或加减缩放，双击复位",
                              "Two-finger scroll to pan, pinch or +/- to zoom, double-click to reset"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(8)
                 }
                 .onAppear { installScrollPan() }
                 .onDisappear { removeScrollPan() }
@@ -112,7 +113,12 @@ struct ScanMapView: View {
         let transform = viewTransform(size: size)
         return ZStack {
             ForEach(statusPaths(size: size, transform: transform)) { group in
-                group.path.fill(group.color)
+                if group.status == .unscanned {
+                    // 淡轮廓表示未扫描（DiskGenius 式淡格），不再整屏灰色色块
+                    group.path.stroke(Color.appSeparator.opacity(0.28), lineWidth: 0.7)
+                } else {
+                    group.path.fill(group.color)
+                }
             }
             if let h = hover {
                 hoverOutline(index: h.index, size: size)
@@ -366,23 +372,13 @@ struct ScanMapView: View {
 
     @ViewBuilder private var progressHeader: some View {
         if let p = appState.progress {
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tr("进度", "Progress")).font(.caption).foregroundColor(.appSecondary)
-                    Text(String(format: "%.2f%%", p.fraction * 100))
-                        .font(.title3.monospacedDigit().weight(.bold))
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tr("速度", "Speed")).font(.caption).foregroundColor(.appSecondary)
-                    Text(String(format: "%.1f MB/s", p.speedMBps)).font(.callout.monospacedDigit())
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tr("已用", "Elapsed")).font(.caption).foregroundColor(.appSecondary)
-                    Text(formatDuration(p.elapsedSeconds)).font(.callout.monospacedDigit())
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tr("预计剩余", "Remaining")).font(.caption).foregroundColor(.appSecondary)
-                    Text(formatDuration(p.etaSeconds)).font(.callout.monospacedDigit())
+            HStack(alignment: .lastTextBaseline, spacing: 22) {
+                Text(String(format: "%.2f%%", p.fraction * 100))
+                    .font(.system(size: 28, weight: .bold).monospacedDigit())
+                HStack(spacing: 18) {
+                    progressMetric(tr("速度", "Speed"), String(format: "%.1f MB/s", p.speedMBps))
+                    progressMetric(tr("已用", "Elapsed"), formatDuration(p.elapsedSeconds))
+                    progressMetric(tr("预计剩余", "Remaining"), formatDuration(p.etaSeconds))
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
@@ -390,7 +386,15 @@ struct ScanMapView: View {
                     Text(byteOffset(p.lastBlock.startOffset)).font(.caption.monospacedDigit())
                 }
             }
-            ProgressView(value: p.fraction).accentColor(progressTint)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.appSeparator.opacity(0.5))
+                GeometryReader { geo in
+                    Capsule().fill(progressTint)
+                        .frame(width: max(6, geo.size.width * CGFloat(p.fraction)))
+                }
+            }
+            .frame(height: 6)
+            .padding(.vertical, 4)
         } else {
             HStack {
                 Image(systemName: "rectangle.grid.3x3")
@@ -406,6 +410,13 @@ struct ScanMapView: View {
         }
     }
 
+    private func progressMetric(_ k: String, _ v: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(k).font(.caption2).foregroundColor(.appSecondary)
+            Text(v).font(.callout.weight(.semibold).monospacedDigit())
+        }
+    }
+
     // MARK: 图例
 
     private var legend: some View {
@@ -413,7 +424,11 @@ struct ScanMapView: View {
             ForEach(BlockStatus.allCases, id: \.self) { s in
                 HStack(spacing: 4) {
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(statusColor(s))
+                        .fill(s == .unscanned ? Color.clear : statusColor(s))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 2)
+                                .stroke(s == .unscanned ? Color.appSeparator : Color.clear, lineWidth: 1)
+                        )
                         .frame(width: 12, height: 12)
                     Text(s.displayName).font(.caption)
                 }
