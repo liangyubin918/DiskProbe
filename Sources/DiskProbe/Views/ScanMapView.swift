@@ -384,7 +384,9 @@ private final class CylinderGridDocumentView: NSView {
         pendingZoomCenterRatio = frame.height > 0 ? visible.midY / frame.height : nil
         cellSize = newSize
         invalidateIntrinsicContentSize()
-        needsDisplay = true
+        // 注意不要在这里 needsDisplay：此刻 bounds 还是旧尺寸，若 AppKit
+        // 抢在 setFrameSize 前重绘，脏区会越过新格子范围（重绘由
+        // performSyncPass 里的 setFrameSize 自动触发，且 draw 已全函数化兜底）
         scheduleSyncPass()
     }
 
@@ -432,14 +434,19 @@ private final class CylinderGridDocumentView: NSView {
     // MARK: 绘制（只画可见区；未扫描柱面不画）
 
     override func draw(_ dirtyRect: NSRect) {
-        guard !cells.isEmpty, cellSize > 0 else { return }
+        // 本函数必须是"全函数"：AppKit 可能在 cellSize 已变、frame 还是旧值
+        // 的窗口里（延迟几何模式）用越界脏区调用 draw，dirtyRect 的行列
+        // 范围可能完全落在当前格子范围之外——任何区间/下标假设都不成立。
+        guard !cells.isEmpty, cellSize > 0, columns > 0 else { return }
         let cols = columns
         let total = cells.count
 
-        let c0 = max(0, Int(dirtyRect.minX / cellSize))
-        let c1 = min(cols - 1, Int(dirtyRect.maxX / cellSize))
-        let r0 = max(0, Int(dirtyRect.minY / cellSize))
-        let r1 = min(rows - 1, Int(dirtyRect.maxY / cellSize))
+        let c0 = max(0, min(cols - 1, Int(dirtyRect.minX / cellSize)))
+        let c1 = max(0, min(cols - 1, Int(dirtyRect.maxX / cellSize)))
+        let maxRow = max(0, (total - 1) / cols)
+        let r0 = max(0, min(maxRow, Int(dirtyRect.minY / cellSize)))
+        let r1 = max(0, min(maxRow, Int(dirtyRect.maxY / cellSize)))
+        guard r0 <= r1, c0 <= c1 else { return }
 
         let gap: CGFloat = cellSize >= 6 ? 1.0 : 0.5
         let useRounded = cellSize >= 6
