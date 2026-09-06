@@ -2,154 +2,337 @@ import SwiftUI
 import AppKit
 import DiskProbeCore
 
-// MARK: - 扫描地图（DiskGenius 式坏道图：一格 = 一个柱面，随扫描逐格点亮）
-//
-// 口径：一格 = 一个经典 LBA 逻辑柱面（255 磁头 × 63 扇区/道 × 512B ≈ 8.2MB，
-// CylinderGrid；现代盘/SSD 不暴露真实 CHS 几何，DiskGenius 对 LBA 盘也按
-// 逻辑柱面展示）。列数固定 100，行数随盘容量增长（500GB ≈ 6 万格）。
-//
-// 渲染：AppKit 直接绘制**可见区域**，未扫描柱面不画（留空）——扫描推进时
-// 只把新增区间置为需要重绘，几十万柱面也只画屏上几千格，主线程开销恒定；
-// 浏览/缩放交给 NSScrollView。
-// 交互：悬停看柱面详情；滚轮/双指滚动；+- 缩放（格子像素大小）；复位按钮；
-//       扫描中自动跟随扫描前沿（用户滚走时暂停跟随，滚回前沿附近即恢复）。
+// MARK: - 扫描地图（核心可视化：色块网格，支持悬停查看 / 缩放 / 平移）
 
+/// 类 DiskGenius 坏道图。固定网格（100×60 格），每格代表一组磁盘块：
+///   绿=正常 黄=警告 红=异常 深红=错误 灰=未扫描
+///
+/// 交互：
+///   - 悬停：显示格子编号、块编号与采样耗时
+///   - 触控板二指滑动 / 滚轮：平移（本地事件监听，不遮挡任何 SwiftUI 手势）
+///   - 双指捏合 / +- 按钮：缩放（1×–16×）；鼠标拖动平移；双击：复位
+///
+/// macOS 11 兼容说明：原实现依赖 Canvas / onContinuousHover / onChange（12+/14+），
+/// 现统一改为 Path 绘制 + NSView 追踪区 + 布局回调，所有系统版本共用一条代码路径。
 struct ScanMapView: View {
     @EnvironmentObject var appState: AppState
 
-    // 视图状态
-    @State private var cellSize: CGFloat = 6
-    @State private var userZoomed = false
+    // 视图变换状态
+    @State private var zoom: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var magBase: CGFloat = 1
+    @State private var dragBase: CGSize = .zero
     @State private var hover: (index: Int, point: CGPoint)? = nil
+    @State private var lastCursor: CGPoint? = nil   // 最后光标位置（画布局部坐标）
     @State private var canvasSize: CGSize = .zero
 
-    /// 是否已有任何已扫描柱面（DiskGenius 式：没扫过就不显示色块）
-    private var hasScannedCells: Bool {
-        appState.mapCells.contains { $0.status != .unscanned }
+    // 二指滚动平移：宿主 NSView 仅用于标定地图区域的窗口坐标；
+    // scrollWheel 事件由本地监听器截获，事件不经过它，因此不遮挡 SwiftUI 手势
+    private final class ScrollRegionRef {
+        weak var view: NSView?
     }
+    @State private var scrollRegion = ScrollRegionRef()
+    @State private var scrollMonitor: Any? = nil
 
-    private var isScanRunning: Bool {
-        appState.scanState == .scanning || appState.scanState == .paused
-    }
+    static let maxZoom: CGFloat = 16
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             progressHeader
 
-            if hasScannedCells {
-                mapArea
-            } else {
-                emptyMapHint
+            GeometryReader { geo in
+                ZStack(alignment: .topLeading) {
+                    // 地图区域宿主：窗口坐标标定（二指平移用）+ 悬停追踪 + 尺寸回调
+                    MapHostView(
+                        onAttach: { scrollRegion.view = $0 },
+                        onResize: { canvasSize = $0 },
+                        onHoverMoved: { point in
+                            if let point = point {
+                                updateHover(at: point, size: geo.size)
+                            } else {
+                                hover = nil
+                            }
+                        }
+                    )
+                    .frame(width: geo.size.width, height: geo.size.height)
+
+                    mapCellsView(size: geo.size)
+                        .background(Color(NSColor.textBackgroundColor).opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appSeparator))
+                        .contentShape(Rectangle())
+                        .gesture(dragGesture(size: geo.size))
+                        .simultaneousGesture(magnifyGesture(size: geo.size))
+                        .onTapGesture(count: 2) { resetView(size: geo.size) }
+
+                    if let h = hover, let cell = cell(at: h.index) {
+                        hoverTooltip(cell: cell, index: h.index)
+                            .position(x: min(geo.size.width - 90, max(90, h.point.x + 8)),
+                                      y: max(30, h.point.y - 42))
+                    }
+
+                    // 缩放控件
+                    HStack(spacing: 10) {
+                        Button { stepZoom(-1, size: geo.size) } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                        }
+                        Text("\(Int((zoom * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .frame(minWidth: 40)
+                        Button { stepZoom(1, size: geo.size) } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                        }
+                        Button { resetView(size: geo.size) } label: {
+                            Image(systemName: "arrow.uturn.backward")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.callout)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(BlurBackground(cornerRadius: 8))
+                    .padding(8)
+                    .help(tr("双指滑动平移，捏合或加减缩放，双击复位",
+                             "Two-finger scroll to pan, pinch or +/- to zoom, double-click to reset"))
+                }
+                .onAppear { installScrollPan() }
+                .onDisappear { removeScrollPan() }
             }
+            .frame(minHeight: 220)
 
             legend
         }
     }
 
-    // MARK: 地图区域
+    // MARK: 地图绘制（Path 版，Canvas 的 macOS 11 等价实现）
 
-    private var mapArea: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .topLeading) {
-                CylinderMapRepresentable(
-                    cells: appState.mapCells,
-                    columns: appState.mapColumns,
-                    cellSize: $cellSize,
-                    autoFollow: isScanRunning,
-                    onViewportResize: { size in
-                        canvasSize = size
-                        // 用户没手动缩放过时，跟随窗口宽度自适应格子大小
-                        if !userZoomed, let fit = fitCellSize(width: size.width) {
-                            cellSize = fit
-                        }
-                    },
-                    onHover: { hover = $0 },
-                    onZoom: { newSize in
-                        userZoomed = true
-                        cellSize = newSize
-                    }
-                )
-                .background(Color(NSColor.textBackgroundColor).opacity(0.4))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.appSeparator))
-
-                if let h = hover, let cell = cell(at: h.index) {
-                    hoverTooltip(cell: cell, index: h.index)
-                        .position(x: min(geo.size.width - 90, max(90, h.point.x + 8)),
-                                  y: max(30, h.point.y - 42))
-                }
-
-                zoomControls
+    /// 按状态分组构建路径，应用视图变换后逐层填充。
+    /// Path 先在"内容坐标系"里构建（与旧 Canvas 相同的坐标），再 applying 变换，
+    /// 因此描边线宽保持屏幕恒定（旧实现用 lineWidth 2/zoom 达到同样效果）。
+    private func mapCellsView(size: CGSize) -> some View {
+        let transform = viewTransform(size: size)
+        return ZStack {
+            ForEach(statusPaths(size: size, transform: transform)) { group in
+                group.path.fill(group.color)
+            }
+            if let h = hover {
+                hoverOutline(index: h.index, size: size)
+                    .stroke(Color.white.opacity(0.85), lineWidth: 2)
             }
         }
-        .frame(minHeight: 220)
     }
 
-    private var zoomControls: some View {
-        HStack(spacing: 10) {
-            Button { stepZoom(-1) } label: {
-                Image(systemName: "minus.magnifyingglass")
+    private struct StatusPath: Identifiable {
+        let status: BlockStatus
+        let path: Path
+        let color: Color
+        var id: BlockStatus { status }
+    }
+
+    private func statusPaths(size: CGSize, transform: CGAffineTransform) -> [StatusPath] {
+        let cells = appState.mapCells
+        let cols = appState.mapColumns
+        guard !cells.isEmpty, cols > 0 else { return [] }
+        let rows = (cells.count + cols - 1) / cols
+        let cw = size.width / CGFloat(cols)
+        let ch = size.height / CGFloat(rows)
+        // DiskGenius 式格间隙（内容坐标系，放大时可见）
+        let gap = min(2.0, max(0.5, cw * 0.10))
+        let corner = min(1.5, gap / 2)
+
+        var grouped: [BlockStatus: Path] = [:]
+        for (i, cell) in cells.enumerated() {
+            let row = i / cols, col = i % cols
+            let rect = CGRect(x: CGFloat(col) * cw + gap / 2, y: CGFloat(row) * ch + gap / 2,
+                              width: cw - gap, height: ch - gap)
+            grouped[cell.status, default: Path()]
+                .addRoundedRect(in: rect, cornerSize: CGSize(width: corner, height: corner))
+        }
+
+        // 固定按 BlockStatus 顺序输出，保证 ForEach 身份稳定
+        return BlockStatus.allCases.compactMap { status in
+            guard var path = grouped[status] else { return nil }
+            path = path.applying(transform)
+            return StatusPath(status: status, path: path, color: statusColor(status))
+        }
+    }
+
+    /// 悬停格高亮描边（线宽不随缩放变化）
+    private func hoverOutline(index: Int, size: CGSize) -> Path {
+        let cols = appState.mapColumns
+        let total = appState.mapCells.count
+        guard cols > 0, total > 0 else { return Path() }
+        let rows = (total + cols - 1) / cols
+        let cw = size.width / CGFloat(cols)
+        let ch = size.height / CGFloat(rows)
+        let row = index / cols, col = index % cols
+        let rect = CGRect(x: CGFloat(col) * cw, y: CGFloat(row) * ch, width: cw, height: ch)
+        return Path(rect).applying(viewTransform(size: size))
+    }
+
+    // MARK: 视图变换
+
+    private func viewTransform(size: CGSize) -> CGAffineTransform {
+        CGAffineTransform(translationX: size.width / 2 + offset.width, y: size.height / 2 + offset.height)
+            .scaledBy(x: zoom, y: zoom)
+            .translatedBy(x: -size.width / 2, y: -size.height / 2)
+    }
+
+    private func contentPoint(from p: CGPoint, size: CGSize) -> CGPoint {
+        CGPoint(x: (p.x - (size.width / 2 + offset.width)) / zoom + size.width / 2,
+                y: (p.y - (size.height / 2 + offset.height)) / zoom + size.height / 2)
+    }
+
+    private func clampOffset(size: CGSize) {
+        let maxX = (zoom - 1) * size.width / 2
+        let maxY = (zoom - 1) * size.height / 2
+        offset = CGSize(width: min(maxX, max(-maxX, offset.width)),
+                        height: min(maxY, max(-maxY, offset.height)))
+    }
+
+    private func dragGesture(size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { v in
+                guard zoom > 1 else { return }
+                offset = CGSize(width: dragBase.width + v.translation.width,
+                                height: dragBase.height + v.translation.height)
+                clampOffset(size: size)
+                refreshHover()
             }
-            Button { stepZoom(1) } label: {
-                Image(systemName: "plus.magnifyingglass")
+            .onEnded { _ in dragBase = offset }
+    }
+
+    private func magnifyGesture(size: CGSize) -> some Gesture {
+        MagnificationGesture()
+            .onChanged { v in
+                zoom = min(Self.maxZoom, max(1, magBase * v))
+                clampOffset(size: size)
+                refreshHover()
             }
-            Button { resetZoom() } label: {
-                Image(systemName: "arrow.uturn.backward")
-            }
-        }
-        .buttonStyle(.borderless)
-        .font(.callout)
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(BlurBackground(cornerRadius: 8))
-        .padding(8)
-        .help(tr("拖动平移，滚轮/双指滚动，捏合或加减缩放格子大小，圆圈按钮复位自适应",
-                 "Drag to pan, scroll to browse, pinch or +/- to resize cells, circular button to reset"))
+            .onEnded { _ in magBase = zoom }
     }
 
-    private func stepZoom(_ direction: Int) {
-        // 离散档位，避免浮点缩放糊掉
-        let steps: [CGFloat] = [3, 4, 5, 6, 8, 10, 13, 16, 20, 26]
-        let current = cellSize
-        let next: CGFloat
-        if direction > 0 {
-            next = steps.first { $0 > current } ?? current
-        } else {
-            next = steps.last { $0 < current } ?? current
+    private func stepZoom(_ direction: Int, size: CGSize) {
+        magBase = zoom
+        zoom = min(Self.maxZoom, max(1, zoom * (direction > 0 ? 2 : 0.5)))
+        clampOffset(size: size)
+        magBase = zoom
+        refreshHover()
+    }
+
+    private func resetView(size: CGSize) {
+        zoom = 1
+        magBase = 1
+        offset = .zero
+        dragBase = .zero
+        refreshHover()
+    }
+
+    // MARK: 二指滑动 / 滚轮平移 + 悬停追踪宿主
+
+    /// 地图区域宿主 NSView，负责三件依赖"自身几何"的事：
+    ///   1. 给二指滚动平移提供窗口坐标标定
+    ///   2. 追踪区上报鼠标移动（onContinuousHover 的 macOS 11 等价实现）
+    ///   3. 尺寸变化回调（onChange(of: geo.size) 的 macOS 11 等价实现）
+    private struct MapHostView: NSViewRepresentable {
+        let onAttach: (NSView) -> Void
+        let onResize: (CGSize) -> Void
+        let onHoverMoved: (CGPoint?) -> Void
+
+        func makeNSView(context: Context) -> MapHostNSView {
+            let v = MapHostNSView()
+            onAttach(v)
+            v.onResize = onResize
+            v.onHoverMoved = onHoverMoved
+            return v
         }
-        if next != current {
-            userZoomed = true
-            cellSize = next
+        func updateNSView(_ nsView: MapHostNSView, context: Context) {
+            nsView.onResize = onResize
+            nsView.onHoverMoved = onHoverMoved
         }
     }
 
-    private func resetZoom() {
-        userZoomed = false
-        if let fit = fitCellSize(width: canvasSize.width) {
-            cellSize = fit
+    private final class MapHostNSView: NSView {
+        var onResize: ((CGSize) -> Void)? = nil
+        var onHoverMoved: ((CGPoint?) -> Void)? = nil
+
+        // SwiftUI 内容左上角为原点，翻转坐标系保持一致
+        override var isFlipped: Bool { true }
+
+        override func layout() {
+            super.layout()
+            onResize?(bounds.size)
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            onHoverMoved?(convert(event.locationInWindow, from: nil))
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            onHoverMoved?(nil)
         }
     }
 
-    /// 按地图区宽度自适应：100 列精确铺满整个宽度
-    private func fitCellSize(width: CGFloat) -> CGFloat? {
-        guard width > 40 else { return nil }
-        return max(3, min(26, width / CGFloat(appState.mapColumns)))
+    /// 本地监听 scrollWheel：光标在地图区域内且已放大时截获用于平移，
+    /// 其余事件原样放行。宿主 NSView 只提供命中范围，不参与事件分发，
+    /// 因此悬停 / 捏合 / 拖动 / 双击等 SwiftUI 手势完全不受影响。
+    private func installScrollPan() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard zoom > 1, let view = scrollRegion.view, view.window != nil else { return event }
+            let local = view.convert(event.locationInWindow, from: nil)
+            guard view.bounds.contains(local) else { return event }
+            // 触控板二指滑动：纵向按"抓取内容"方向（手指向哪地图向哪），
+            // 横向按标准滚动方向（右滑内容左移，左滑内容右移）
+            offset = CGSize(width: offset.width + event.scrollingDeltaX,
+                            height: offset.height + event.scrollingDeltaY)
+            clampOffset(size: canvasSize)
+            dragBase = offset
+            refreshHover()
+            return nil
+        }
     }
 
-    /// 未扫描时的提示（DiskGenius 式：扫到哪亮到哪，此时尚无色块）
-    private var emptyMapHint: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "square.grid.3x3")
-                .font(.system(size: 44))
-                .foregroundColor(.appQuaternary)
-            Text(isScanRunning
-                 ? tr("扫描已开始，色块将随扫描进度逐柱面点亮", "Scanning — cells light up cylinder by cylinder")
-                 : tr("点击「开始扫描」开始检测；色块将随扫描进度逐柱面点亮", "Click Start Scan; cells light up cylinder by cylinder as scanning progresses"))
-                .font(.callout).foregroundColor(.appSecondary)
+    private func removeScrollPan() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
         }
-        .frame(maxWidth: .infinity, minHeight: 220)
     }
 
     // MARK: 悬停
+
+    /// 平移/缩放后地图在光标下滑动，用最后光标位置重算悬停格，
+    /// 保证移动过程中与停止后 tooltip 都实时更新
+    private func refreshHover() {
+        guard let p = lastCursor, canvasSize != .zero else { return }
+        updateHover(at: p, size: canvasSize)
+    }
+
+    private func updateHover(at p: CGPoint, size: CGSize) {
+        lastCursor = p
+        let cols = appState.mapColumns
+        let total = appState.mapCells.count
+        guard total > 0, cols > 0 else { hover = nil; return }
+        let rows = (total + cols - 1) / cols
+        let cp = contentPoint(from: p, size: size)
+        let col = Int(cp.x / (size.width / CGFloat(cols)))
+        let row = Int(cp.y / (size.height / CGFloat(rows)))
+        guard row >= 0, row < rows, col >= 0, col < cols else { hover = nil; return }
+        let idx = row * cols + col
+        guard idx < total else { hover = nil; return }
+        hover = (idx, p)
+    }
 
     private func cell(at index: Int) -> MapCell? {
         guard index >= 0, index < appState.mapCells.count else { return nil }
@@ -158,7 +341,7 @@ struct ScanMapView: View {
 
     @ViewBuilder private func hoverTooltip(cell: MapCell, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(tr("柱面 #\(index)", "Cylinder #\(index)"))
+            Text(tr("格子 #\(index)", "Cell #\(index)"))
                 .font(.caption.monospacedDigit().weight(.bold))
             if cell.blockIndex >= 0 {
                 Text(tr("块 #\(cell.blockIndex)", "Block #\(cell.blockIndex)"))
@@ -176,6 +359,7 @@ struct ScanMapView: View {
         .background(BlurBackground(cornerRadius: 7))
         .fixedSize()
         .allowsHitTesting(false)
+        .transition(.opacity)
     }
 
     // MARK: 顶部进度行
@@ -235,8 +419,8 @@ struct ScanMapView: View {
                 }
             }
             Spacer()
-            Text(tr("每格 = 1 柱面（约 8.2MB）· 淡格 = 未扫描 · 拖动平移，捏合缩放，悬停看详情",
-                    "1 cell = 1 cylinder (~8.2MB) · faint cells unscanned · drag to pan, pinch to zoom, hover for details"))
+            Text(tr("悬停查看格子详情，双指滑动平移，捏合缩放，双击复位",
+                    "Hover for cell details · two-finger scroll to pan · pinch to zoom · double-click to reset"))
                 .font(.caption2).foregroundColor(.appTertiary)
         }
     }
@@ -276,376 +460,4 @@ struct ScanMapView: View {
 enum StatusPalette {
     static let errorDark   = Color(red: 0.55, green: 0.0, blue: 0.0)
     static let unscanned   = Color(NSColor.tertiaryLabelColor).opacity(0.35)
-}
-
-// MARK: - NSView 桥接
-
-private struct CylinderMapRepresentable: NSViewRepresentable {
-    let cells: [MapCell]
-    let columns: Int
-    @Binding var cellSize: CGFloat
-    let autoFollow: Bool
-    let onViewportResize: (CGSize) -> Void
-    let onHover: ((index: Int, point: CGPoint)?) -> Void
-    /// 捏合缩放在 NSView 内直接生效后，把新值推回 SwiftUI（userZoomed/cellSize）
-    let onZoom: (CGFloat) -> Void
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-
-        let doc = CylinderGridDocumentView()
-        doc.columns = columns
-        doc.cellSize = cellSize
-        doc.onHover = onHover
-        doc.onViewportResize = onViewportResize
-        doc.onZoom = onZoom
-        scroll.documentView = doc
-        return scroll
-    }
-
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let doc = scroll.documentView as? CylinderGridDocumentView else { return }
-        doc.columns = columns
-        doc.autoFollow = autoFollow
-        if doc.cellSize != cellSize {
-            doc.setCellSize(cellSize)
-        }
-        doc.apply(cells: cells)
-    }
-}
-
-// MARK: - 柱面网格文档视图（直接绘制可见区，增量重绘）
-
-private final class CylinderGridDocumentView: NSView {
-    private(set) var cells: [MapCell] = []
-    var columns = 100
-    var cellSize: CGFloat = 6
-    var autoFollow = false
-    var onHover: ((index: Int, point: CGPoint)?) -> Void = { _ in }
-    var onViewportResize: (CGSize) -> Void = { _ in }
-    var onZoom: (CGFloat) -> Void = { _ in }
-
-    private var userScrolledAway = false
-    private var scrollObserver: NSObjectProtocol? = nil
-    private var lastReportedViewport: CGSize = .zero
-
-    override var isFlipped: Bool { true }
-
-    private var rows: Int {
-        max(1, (max(cells.count, 1) + columns - 1) / columns)
-    }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: CGFloat(columns) * cellSize + 2, height: CGFloat(rows) * cellSize + 2)
-    }
-
-    // MARK: 数据更新
-
-    /// 应用新快照：只把发生变化的格区间标记为需要重绘。
-    /// 扫描顺序推进，变化通常是一段连续区间；即使个别格子被更严重的
-    /// 状态改写，diff 也能覆盖。
-    func apply(cells newCells: [MapCell]) {
-        let old = cells
-        cells = newCells
-
-        var lo = Int.max, hi = -1
-        let common = min(old.count, newCells.count)
-        var i = 0
-        // 前缀跳过：扫描顺序推进，前面已定稿的格子绝大多数不变
-        while i < common, old[i] == newCells[i] { i += 1 }
-        while i < common {
-            if old[i] != newCells[i] { lo = min(lo, i); hi = max(hi, i) }
-            i += 1
-        }
-        if newCells.count > old.count {
-            lo = min(lo, old.count)
-            hi = max(hi, newCells.count - 1)
-        }
-
-        if old.count != newCells.count {
-            invalidateIntrinsicContentSize()
-        }
-        if hi >= 0 {
-            setNeedsDisplay(rectForCells(lo...hi))
-        }
-        scheduleSyncPass()
-    }
-
-    /// 缩放：保持内容纵向居中比例，避免缩放后跳到别处。
-    /// 几何调整延迟到 scheduleSyncPass（见其注释）。
-    func setCellSize(_ newSize: CGFloat) {
-        guard newSize != cellSize else { return }
-        let visible = enclosingScrollView?.documentVisibleRect ?? .zero
-        pendingZoomCenterRatio = frame.height > 0 ? visible.midY / frame.height : nil
-        cellSize = newSize
-        invalidateIntrinsicContentSize()
-        // 注意不要在这里 needsDisplay：此刻 bounds 还是旧尺寸，若 AppKit
-        // 抢在 setFrameSize 前重绘，脏区会越过新格子范围（重绘由
-        // performSyncPass 里的 setFrameSize 自动触发，且 draw 已全函数化兜底）
-        scheduleSyncPass()
-    }
-
-    /// 几何变更（frameSize / 滚动）统一延迟到本轮 SwiftUI 更新结束后执行：
-    /// 在 updateNSView 或布局过程中改几何会同步触发 AppKit 布局，重入
-    /// SwiftUI 视图更新——实测轻则视图刷新停摆（进度冻结在第一个事件），
-    /// 重则视图图损坏直接 SIGSEGV。
-    private var syncScheduled = false
-    private var pendingZoomCenterRatio: CGFloat? = nil
-
-    private func scheduleSyncPass() {
-        guard !syncScheduled else { return }
-        syncScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.syncScheduled = false
-            self.performSyncPass()
-        }
-    }
-
-    private func performSyncPass() {
-        let desired = intrinsicContentSize
-        if frame.size != desired { setFrameSize(desired) }
-        if let ratio = pendingZoomCenterRatio {
-            pendingZoomCenterRatio = nil
-            let visible = enclosingScrollView?.documentVisibleRect ?? .zero
-            if frame.height > visible.height, let clip = enclosingScrollView {
-                let y = max(0, ratio * frame.height - visible.height / 2)
-                clip.contentView.scroll(to: NSPoint(x: 0, y: y))
-                clip.reflectScrolledClipView(clip.contentView)
-            }
-        } else {
-            followLeadingIfNeeded()
-        }
-    }
-
-    private func rectForCells(_ range: ClosedRange<Int>) -> NSRect {
-        let firstRow = range.lowerBound / columns
-        let lastRow = range.upperBound / columns
-        let y = CGFloat(firstRow) * cellSize
-        let height = CGFloat(lastRow - firstRow + 1) * cellSize
-        return NSRect(x: 0, y: y, width: frame.width, height: height)
-    }
-
-    // MARK: 绘制（只画可见区；未扫描柱面不画）
-
-    override func draw(_ dirtyRect: NSRect) {
-        // 本函数必须是"全函数"：AppKit 可能在 cellSize 已变、frame 还是旧值
-        // 的窗口里（延迟几何模式）用越界脏区调用 draw，dirtyRect 的行列
-        // 范围可能完全落在当前格子范围之外——任何区间/下标假设都不成立。
-        guard !cells.isEmpty, cellSize > 0, columns > 0 else { return }
-        let cols = columns
-        let total = cells.count
-
-        let c0 = max(0, min(cols - 1, Int(dirtyRect.minX / cellSize)))
-        let c1 = max(0, min(cols - 1, Int(dirtyRect.maxX / cellSize)))
-        let maxRow = max(0, (total - 1) / cols)
-        let r0 = max(0, min(maxRow, Int(dirtyRect.minY / cellSize)))
-        let r1 = max(0, min(maxRow, Int(dirtyRect.maxY / cellSize)))
-        guard r0 <= r1, c0 <= c1 else { return }
-
-        let gap: CGFloat = cellSize >= 6 ? 1.0 : 0.5
-        let useRounded = cellSize >= 6
-        let corner = max(0.5, min(1.5, gap / 2))
-
-        let outline = NSColor.separatorColor.withAlphaComponent(0.16)
-        for row in r0...r1 {
-            let y = CGFloat(row) * cellSize
-            for col in c0...c1 {
-                let index = row * cols + col
-                guard index < total else { break }
-                let cell = cells[index]
-
-                let rect = NSRect(x: CGFloat(col) * cellSize + gap / 2,
-                                  y: y + gap / 2,
-                                  width: cellSize - gap,
-                                  height: cellSize - gap)
-                if cell.status == .unscanned {
-                    // 未扫描：只画淡轮廓（不是色块），让全盘范围可见
-                    outline.setStroke()
-                    NSBezierPath(rect: rect).stroke()
-                } else {
-                    nsColor(cell.status).setFill()
-                    if useRounded {
-                        NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner).fill()
-                    } else {
-                        rect.fill()
-                    }
-                }
-            }
-        }
-    }
-
-    private func nsColor(_ s: BlockStatus) -> NSColor {
-        switch s {
-        case .normal:    return .systemGreen
-        case .warning:   return .systemYellow
-        case .abnormal:  return .systemRed
-        case .error:     return NSColor(red: 0.55, green: 0.0, blue: 0.0, alpha: 1)
-        case .unscanned: return .clear
-        }
-    }
-
-    // MARK: 布局 / 视口回调
-
-    override func layout() {
-        super.layout()
-        guard let clip = enclosingScrollView else { return }
-        let size = clip.contentSize
-        guard size != lastReportedViewport else { return }
-        // 注意：不能在布局过程中同步回调（回调里会设置 SwiftUI @State，
-        // 触发布局重入，直接崩溃于 NSApplication _crashOnException），甩到下一轮
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  size == self.enclosingScrollView?.contentSize,
-                  size != self.lastReportedViewport else { return }
-            self.lastReportedViewport = size
-            self.onViewportResize(size)
-        }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        observeScrollIfNeeded()
-    }
-
-    private func observeScrollIfNeeded() {
-        guard scrollObserver == nil, let clip = enclosingScrollView else { return }
-        scrollObserver = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: clip.contentView,
-            queue: .main
-        ) { [weak self] _ in
-            self?.noteUserScrolled()
-        }
-    }
-
-    /// 用户滚动时判断是否离开了扫描前沿附近；离开则暂停自动跟随
-    private func noteUserScrolled() {
-        guard autoFollow, let clip = enclosingScrollView else { return }
-        let visible = clip.documentVisibleRect
-        if let rect = leadingRect(), visible.intersects(rect.insetBy(dx: 0, dy: -visible.height)) {
-            userScrolledAway = false
-        } else {
-            userScrolledAway = true
-        }
-    }
-
-    /// 扫描前沿（最后一个已扫描柱面）所在行
-    private func leadingRect() -> NSRect? {
-        guard let index = cells.lastIndex(where: { $0.status != .unscanned }) else { return nil }
-        let row = index / columns
-        return NSRect(x: 0, y: CGFloat(row) * cellSize, width: frame.width, height: cellSize)
-    }
-
-    private func followLeadingIfNeeded() {
-        guard autoFollow, !userScrolledAway,
-              let clip = enclosingScrollView,
-              let rect = leadingRect() else { return }
-        let visible = clip.documentVisibleRect
-        guard !visible.intersects(rect) else { return }
-        let target = NSPoint(x: 0, y: max(0, rect.midY - visible.height / 2))
-        clip.contentView.scroll(to: target)
-        clip.reflectScrolledClipView(clip.contentView)
-    }
-
-    // MARK: 捏合缩放 / 拖拽平移
-    //
-    // 这两个都发生在事件处理上下文（不在 SwiftUI 更新/布局过程中），
-    // 直接改几何是安全的；缩放以光标为锚点，缩放前后光标下的内容点不动。
-
-    override func magnify(with event: NSEvent) {
-        let factor = 1 + event.magnification
-        guard factor > 0, abs(event.magnification) > 0.001 else { return }
-        let newSize = max(3, min(26, cellSize * factor))
-        guard abs(newSize - cellSize) > 0.01 else { return }
-        let anchor = convert(event.locationInWindow, from: nil)
-        applyZoomNow(newSize, anchorDocPoint: anchor)
-        onZoom(newSize)
-    }
-
-    private func applyZoomNow(_ newSize: CGFloat, anchorDocPoint: CGPoint?) {
-        let scale = newSize / cellSize
-        let visible = enclosingScrollView?.documentVisibleRect ?? .zero
-        var newOrigin = visible.origin
-        if let a = anchorDocPoint {
-            let viewportOffset = CGPoint(x: a.x - visible.minX, y: a.y - visible.minY)
-            newOrigin = CGPoint(x: a.x * scale - viewportOffset.x,
-                                y: a.y * scale - viewportOffset.y)
-        }
-        cellSize = newSize
-        invalidateIntrinsicContentSize()
-        setFrameSize(intrinsicContentSize)
-        needsDisplay = true
-        if let clip = enclosingScrollView {
-            clip.contentView.scroll(to: newOrigin)
-            clip.reflectScrolledClipView(clip.contentView)
-        }
-    }
-
-    private var dragLastPoint: NSPoint? = nil
-
-    override func mouseDown(with event: NSEvent) {
-        dragLastPoint = convert(event.locationInWindow, from: nil)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let last = dragLastPoint, let clip = enclosingScrollView else { return }
-        let nowPoint = convert(event.locationInWindow, from: nil)
-        let dx = nowPoint.x - last.x
-        let dy = nowPoint.y - last.y
-        dragLastPoint = nowPoint
-        let visible = clip.documentVisibleRect
-        var origin = visible.origin
-        origin.x = max(0, min(max(0, frame.width - visible.width), origin.x - dx))
-        origin.y = max(0, min(max(0, frame.height - visible.height), origin.y - dy))
-        clip.contentView.scroll(to: origin)
-        clip.reflectScrolledClipView(clip.contentView)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragLastPoint = nil
-    }
-
-    // MARK: 悬停
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: .zero,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        ))
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        let docPoint = convert(event.locationInWindow, from: nil)
-        let clipPoint = NSPoint(x: docPoint.x - (enclosingScrollView?.documentVisibleRect.minX ?? 0),
-                                y: docPoint.y - (enclosingScrollView?.documentVisibleRect.minY ?? 0))
-        let col = Int(docPoint.x / cellSize)
-        let row = Int(docPoint.y / cellSize)
-        guard col >= 0, col < columns, row >= 0 else { onHover(nil); return }
-        let index = row * columns + col
-        guard index < cells.count, cells[index].status != .unscanned else {
-            onHover(nil)
-            return
-        }
-        onHover((index, CGPoint(x: clipPoint.x, y: clipPoint.y)))
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onHover(nil)
-    }
-
-    deinit {
-        if let observer = scrollObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-    }
 }

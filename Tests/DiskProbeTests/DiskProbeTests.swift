@@ -237,8 +237,8 @@ import Testing
 
     @Test func csvCellDetailCoversWholeDisk() {
         let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: anomalies)
-        #expect(csv.contains(tr("柱面序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号",
-                                "cylinder,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index")))
+        #expect(csv.contains(tr("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号",
+                                "cell,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index")))
         #expect(csv.contains("0,0,10172,0,\(BlockStatus.normal.displayName),8.0,0"))
         #expect(csv.contains("1,10173,20345,1333395456,\(BlockStatus.warning.displayName),120.5,12"))
         #expect(csv.contains("2,20346,30517,2666790912,\(BlockStatus.unscanned.displayName),,"))  // 未扫描格无采样值
@@ -352,27 +352,5 @@ import Testing
         #expect(parsed.anomalies.count == 1)
         #expect(parsed.anomalies[0].status == .abnormal)
         #expect(parsed.anomalies[0].offsetBytes == 384)
-    }
-}
-
-// MARK: 柱面网格（一格 = 一个 8.2MB 逻辑柱面）
-
-@Suite struct CylinderGridTests {
-    @Test func oneCylinderForSmallDisks() {
-        #expect(CylinderGrid.count(forDiskSizeBytes: 0) == 1)
-        #expect(CylinderGrid.count(forDiskSizeBytes: 1) == 1)
-        #expect(CylinderGrid.count(forDiskSizeBytes: CylinderGrid.bytesPerCylinder) == 1)
-    }
-
-    @Test func ceilDivisionForPartialCylinder() {
-        #expect(CylinderGrid.count(forDiskSizeBytes: CylinderGrid.bytesPerCylinder + 1) == 2)
-        let halfGB: Int64 = 500_000_000
-        #expect(CylinderGrid.count(forDiskSizeBytes: halfGB) == Int((halfGB + CylinderGrid.bytesPerCylinder - 1) / CylinderGrid.bytesPerCylinder))
-    }
-
-    @Test func largeDiskIsAroundExpectedCylinders() {
-        // 500GB ≈ 6 万柱面量级
-        let count = CylinderGrid.count(forDiskSizeBytes: 500_000_000_000)
-        #expect(count > 50_000 && count < 70_000)
     }
 }

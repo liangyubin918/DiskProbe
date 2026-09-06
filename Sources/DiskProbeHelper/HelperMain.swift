@@ -172,12 +172,7 @@ final class ScanRunner: NSObject, HelperScanProtocol {
                         readErrno = Int32(errno)
                         break
                     }
-                    if n == 0 {
-                        // 到达盘末。提前 EOF（远小于容量）意味着设备/桥接异常，
-                        // 打印现场便于排查（stdout/stderr 进 helper 日志）
-                        NSLog("[DiskProbeHelper] EOF at offset %lld (block #%lld, done=%d)", offset, offset / Int64(blockSize), done)
-                        eof = true; break
-                    }
+                    if n == 0 { eof = true; break }  // 到达盘末
                     done += n
                 }
                 lastElapsed = elapsedMsSince(started)
