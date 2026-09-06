@@ -63,7 +63,11 @@ struct ScanMapView: View {
                             cellSize = fit
                         }
                     },
-                    onHover: { hover = $0 }
+                    onHover: { hover = $0 },
+                    onZoom: { newSize in
+                        userZoomed = true
+                        cellSize = newSize
+                    }
                 )
                 .background(Color(NSColor.textBackgroundColor).opacity(0.4))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -98,8 +102,8 @@ struct ScanMapView: View {
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(BlurBackground(cornerRadius: 8))
         .padding(8)
-        .help(tr("滚轮/双指滚动浏览，加减缩放格子大小，圆圈按钮复位自适应",
-                 "Scroll to browse, +/- to resize cells, circular button to reset"))
+        .help(tr("拖动平移，滚轮/双指滚动，捏合或加减缩放格子大小，圆圈按钮复位自适应",
+                 "Drag to pan, scroll to browse, pinch or +/- to resize cells, circular button to reset"))
     }
 
     private func stepZoom(_ direction: Int) {
@@ -125,10 +129,10 @@ struct ScanMapView: View {
         }
     }
 
-    /// 按地图区宽度自适应：100 列铺满（留出滚动条与边距）
+    /// 按地图区宽度自适应：100 列精确铺满整个宽度
     private func fitCellSize(width: CGFloat) -> CGFloat? {
         guard width > 40 else { return nil }
-        return max(3, min(26, floor((width - 24) / CGFloat(appState.mapColumns))))
+        return max(3, min(26, width / CGFloat(appState.mapColumns)))
     }
 
     /// 未扫描时的提示（DiskGenius 式：扫到哪亮到哪，此时尚无色块）
@@ -231,8 +235,8 @@ struct ScanMapView: View {
                 }
             }
             Spacer()
-            Text(tr("每格 = 1 柱面（约 8.2MB）· 未扫描柱面不显示 · 悬停看详情",
-                    "1 cell = 1 cylinder (~8.2MB) · unscanned cylinders hidden · hover for details"))
+            Text(tr("每格 = 1 柱面（约 8.2MB）· 淡格 = 未扫描 · 拖动平移，捏合缩放，悬停看详情",
+                    "1 cell = 1 cylinder (~8.2MB) · faint cells unscanned · drag to pan, pinch to zoom, hover for details"))
                 .font(.caption2).foregroundColor(.appTertiary)
         }
     }
@@ -283,6 +287,8 @@ private struct CylinderMapRepresentable: NSViewRepresentable {
     let autoFollow: Bool
     let onViewportResize: (CGSize) -> Void
     let onHover: ((index: Int, point: CGPoint)?) -> Void
+    /// 捏合缩放在 NSView 内直接生效后，把新值推回 SwiftUI（userZoomed/cellSize）
+    let onZoom: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -297,6 +303,7 @@ private struct CylinderMapRepresentable: NSViewRepresentable {
         doc.cellSize = cellSize
         doc.onHover = onHover
         doc.onViewportResize = onViewportResize
+        doc.onZoom = onZoom
         scroll.documentView = doc
         return scroll
     }
@@ -321,6 +328,7 @@ private final class CylinderGridDocumentView: NSView {
     var autoFollow = false
     var onHover: ((index: Int, point: CGPoint)?) -> Void = { _ in }
     var onViewportResize: (CGSize) -> Void = { _ in }
+    var onZoom: (CGFloat) -> Void = { _ in }
 
     private var userScrolledAway = false
     private var scrollObserver: NSObjectProtocol? = nil
@@ -437,23 +445,29 @@ private final class CylinderGridDocumentView: NSView {
         let useRounded = cellSize >= 6
         let corner = max(0.5, min(1.5, gap / 2))
 
+        let outline = NSColor.separatorColor.withAlphaComponent(0.16)
         for row in r0...r1 {
             let y = CGFloat(row) * cellSize
             for col in c0...c1 {
                 let index = row * cols + col
                 guard index < total else { break }
                 let cell = cells[index]
-                guard cell.status != .unscanned else { continue }
 
                 let rect = NSRect(x: CGFloat(col) * cellSize + gap / 2,
                                   y: y + gap / 2,
                                   width: cellSize - gap,
                                   height: cellSize - gap)
-                nsColor(cell.status).setFill()
-                if useRounded {
-                    NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner).fill()
+                if cell.status == .unscanned {
+                    // 未扫描：只画淡轮廓（不是色块），让全盘范围可见
+                    outline.setStroke()
+                    NSBezierPath(rect: rect).stroke()
                 } else {
-                    rect.fill()
+                    nsColor(cell.status).setFill()
+                    if useRounded {
+                        NSBezierPath(roundedRect: rect, xRadius: corner, yRadius: corner).fill()
+                    } else {
+                        rect.fill()
+                    }
                 }
             }
         }
@@ -530,6 +544,64 @@ private final class CylinderGridDocumentView: NSView {
         let target = NSPoint(x: 0, y: max(0, rect.midY - visible.height / 2))
         clip.contentView.scroll(to: target)
         clip.reflectScrolledClipView(clip.contentView)
+    }
+
+    // MARK: 捏合缩放 / 拖拽平移
+    //
+    // 这两个都发生在事件处理上下文（不在 SwiftUI 更新/布局过程中），
+    // 直接改几何是安全的；缩放以光标为锚点，缩放前后光标下的内容点不动。
+
+    override func magnify(with event: NSEvent) {
+        let factor = 1 + event.magnification
+        guard factor > 0, abs(event.magnification) > 0.001 else { return }
+        let newSize = max(3, min(26, cellSize * factor))
+        guard abs(newSize - cellSize) > 0.01 else { return }
+        let anchor = convert(event.locationInWindow, from: nil)
+        applyZoomNow(newSize, anchorDocPoint: anchor)
+        onZoom(newSize)
+    }
+
+    private func applyZoomNow(_ newSize: CGFloat, anchorDocPoint: CGPoint?) {
+        let scale = newSize / cellSize
+        let visible = enclosingScrollView?.documentVisibleRect ?? .zero
+        var newOrigin = visible.origin
+        if let a = anchorDocPoint {
+            let viewportOffset = CGPoint(x: a.x - visible.minX, y: a.y - visible.minY)
+            newOrigin = CGPoint(x: a.x * scale - viewportOffset.x,
+                                y: a.y * scale - viewportOffset.y)
+        }
+        cellSize = newSize
+        invalidateIntrinsicContentSize()
+        setFrameSize(intrinsicContentSize)
+        needsDisplay = true
+        if let clip = enclosingScrollView {
+            clip.contentView.scroll(to: newOrigin)
+            clip.reflectScrolledClipView(clip.contentView)
+        }
+    }
+
+    private var dragLastPoint: NSPoint? = nil
+
+    override func mouseDown(with event: NSEvent) {
+        dragLastPoint = convert(event.locationInWindow, from: nil)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let last = dragLastPoint, let clip = enclosingScrollView else { return }
+        let nowPoint = convert(event.locationInWindow, from: nil)
+        let dx = nowPoint.x - last.x
+        let dy = nowPoint.y - last.y
+        dragLastPoint = nowPoint
+        let visible = clip.documentVisibleRect
+        var origin = visible.origin
+        origin.x = max(0, min(max(0, frame.width - visible.width), origin.x - dx))
+        origin.y = max(0, min(max(0, frame.height - visible.height), origin.y - dy))
+        clip.contentView.scroll(to: origin)
+        clip.reflectScrolledClipView(clip.contentView)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragLastPoint = nil
     }
 
     // MARK: 悬停
