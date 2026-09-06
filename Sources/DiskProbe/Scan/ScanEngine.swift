@@ -67,8 +67,9 @@ actor ScanEngine {
 
     /// 开始真实只读扫描（通过特权 XPC helper）。
     /// 返回 false 表示未能启动，原因见 takeLastAuthError()。
+    /// 地图一格 = 一个逻辑柱面（CylinderGrid ≈ 8.2MB），格数由盘容量决定。
     @discardableResult
-    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024, cellCount: Int = 6000) async -> Bool {
+    func start(disk: DiskInfo, blockSize: Int64 = 128 * 1024) async -> Bool {
         guard state == .idle || state == .finished || state == .stopped || state == .error else {
             lastAuthError = tr("扫描正在进行中，请先停止当前扫描。", "A scan is already running; stop it first.")
             return false
@@ -93,7 +94,7 @@ actor ScanEngine {
         self.diskSize = disk.sizeBytes
         self.blockSize = blockSize
         self.totalBlocks = max(1, Int(quotient + (remainder == 0 ? 0 : 1)))
-        self.cellCount = max(1, cellCount)
+        self.cellCount = CylinderGrid.count(forDiskSizeBytes: disk.sizeBytes)
         self.cellsPerGroup = Self.cellsPerBlockGroup(totalBlocks: self.totalBlocks, cellCount: self.cellCount)
         self.map = Array(repeating: .unscanned, count: self.cellCount)
         self.stopRequested = false

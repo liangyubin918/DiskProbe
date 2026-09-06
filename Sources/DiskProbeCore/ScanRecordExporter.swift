@@ -30,15 +30,15 @@ public enum ScanRecordExporter {
                                  "normal \(s.normal) / warning \(s.warning) / abnormal \(s.abnormal) / error \(s.error)")
             lines.append(tr("汇总", "Summary") + "," + escape(summaryText))
         }
-        let noteText = tr("块级明细仅含非正常块（警告/异常/错误）；格子明细覆盖全盘，状态取格内最严重块，耗时为该状态的采样值",
-                          "Block detail lists only non-normal blocks (warning/abnormal/error); cell detail covers the whole disk with the most severe status per cell and its sampled elapsed time")
+        let noteText = tr("块级明细仅含非正常块（警告/异常/错误）；柱面明细覆盖全盘（一格一个 8.2MB 逻辑柱面），状态取柱面内最严重块，耗时为该状态的采样值",
+                          "Block detail lists only non-normal blocks (warning/abnormal/error); cylinder detail covers the whole disk (one row per 8.2MB logical cylinder) with the most severe status per cylinder and its sampled elapsed time")
         lines.append(tr("说明", "Note") + "," + escape(noteText))
         lines.append("")
 
         // 格子明细：正常块不逐条落盘（百万行级），但格子汇总始终有全盘数据可分析
         if let m = meta, m.totalBlocks > 0, !cells.isEmpty {
-            lines.append(tr("格子明细", "Cell detail"))
-            lines.append(tr("格子序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号", "cell,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index"))
+            lines.append(tr("柱面明细", "Cylinder detail"))
+            lines.append(tr("柱面序号,起始块,结束块,起始偏移(字节),状态,采样耗时(ms),采样块序号", "cylinder,start block,end block,start offset (bytes),status,sampled elapsed (ms),sampled block index"))
             // 与 ScanEngine.cellsPerBlockGroup 同一公式：导出端无法访问引擎内部，按同一定义重算
             let per = (m.totalBlocks + cells.count - 1) / cells.count
             for (i, c) in cells.enumerated() {

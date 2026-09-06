@@ -121,9 +121,11 @@ final class AppState: ObservableObject {
     @Published var statAbnormal = 0
     @Published var statError = 0
 
-    // 地图尺寸
+    // 地图尺寸：列数固定，行数随盘容量（一格 = 一个逻辑柱面，见 CylinderGrid）
     let mapColumns = 100
-    let mapRows = 60
+
+    /// 本次扫描期望的地图格数（柱面数），用于校验进度快照
+    private var expectedCellCount = 0
 
     // 进度监听任务（保证任意时刻只有一个消费者，避免事件被瓜分）
     private var listenerTask: Task<Void, Never>? = nil
@@ -592,8 +594,9 @@ final class AppState: ObservableObject {
         saveSuccessMessage = nil
         resetStats()
 
-        // 初始化地图
-        mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
+        // 初始化地图：一格 = 一个逻辑柱面，数量由盘容量决定
+        expectedCellCount = CylinderGrid.count(forDiskSizeBytes: d.sizeBytes)
+        mapCells = Array(repeating: .unscanned, count: expectedCellCount)
 
         // 取消旧监听，保证进度流始终只有一个消费者
         listenerTask?.cancel()
@@ -608,8 +611,7 @@ final class AppState: ObservableObject {
             }
             let started = await engine.start(
                 disk: d,
-                blockSize: Int64(blockSizeKB) * 1024,
-                cellCount: mapColumns * mapRows
+                blockSize: Int64(blockSizeKB) * 1024
             )
             guard started else {
                 authError = await engine.takeLastAuthError() ?? tr("无法开始扫描。", "Unable to start the scan.")
@@ -642,7 +644,8 @@ final class AppState: ObservableObject {
         resultsDiskID = nil
         progress = nil
         saveSuccessMessage = nil
-        mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
+        expectedCellCount = 0
+        mapCells = []
         resetStats()
     }
 
@@ -693,7 +696,7 @@ final class AppState: ObservableObject {
     /// 即使事件被缓冲策略合并丢弃，下一次事件仍是正确状态。
     private func applyProgress(_ p: ScanProgress) {
         progress = p
-        if p.mapCells.count == mapColumns * mapRows {
+        if p.mapCells.count == expectedCellCount {
             mapCells = p.mapCells
         }
         statNormal = p.summary.normal

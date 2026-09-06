@@ -95,8 +95,24 @@ public struct MapCell: Sendable, Equatable, Codable {
     }
 }
 
-// MARK: - 扫描记录导出
+// MARK: - 柱面网格（扫描地图的格子口径）
 
+/// 扫描地图一格 = 一个经典 LBA 逻辑柱面：255 磁头 × 63 扇区/道 × 512B ≈ 8.2MB。
+/// 现代盘（尤其 SSD）不暴露真实 CHS 几何，DiskGenius 对 LBA 盘也按此逻辑
+/// 柱面口径展示；这里统一用它把「块」聚合成「柱面」。
+public enum CylinderGrid {
+    public static let bytesPerCylinder: Int64 = 255 * 63 * 512  // 8_225_280 ≈ 8.2MB
+
+    /// 一块盘有多少个柱面格子（向上取整；最小 1）
+    public static func count(forDiskSizeBytes size: Int64) -> Int {
+        guard size > 0 else { return 1 }
+        let quotient = size / bytesPerCylinder
+        let remainder = size % bytesPerCylinder
+        return max(1, Int(quotient + (remainder == 0 ? 0 : 1)))
+    }
+}
+
+// MARK: - 扫描记录导出
 /// 一次扫描的元信息（导出报告的头部）
 public struct ScanMeta: Codable, Sendable {
     public var diskName: String
