@@ -68,8 +68,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>DiskProbe</string>
     <key>CFBundleIdentifier</key><string>local.diskprobe</string>
-    <key>CFBundleVersion</key><string>2.9</string>
-    <key>CFBundleShortVersionString</key><string>2.9</string>
+    <key>CFBundleVersion</key><string>3.0</string>
+    <key>CFBundleShortVersionString</key><string>3.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>$APP_NAME</string>
     <key>LSMinimumSystemVersion</key><string>11.0</string>
