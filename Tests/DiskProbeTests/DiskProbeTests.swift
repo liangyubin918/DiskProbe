@@ -252,8 +252,48 @@ import Testing
     }
 
     @Test func csvEscapesCommasInDiskName() {
-        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: cells, anomalies: [])
+        let csv = ScanRecordExporter.csv(meta: meta, summary: summary, cells: [], anomalies: [])
         #expect(csv.contains("\"WD Elements, 25A3 (/dev/disk8)\""))
+    }
+
+    @Test func csvEscapesCarriageReturnsAndQuoteContent() {
+        // \r 与 \n 一样破坏行结构，必须触发加引号；引号本身双写
+        #expect(ScanRecordExporter.escape("a\rb") == "\"a\rb\"")
+        #expect(ScanRecordExporter.escape("a\"b") == "\"a\"\"b\"")
+        #expect(ScanRecordExporter.escape("plain") == "plain")
+    }
+
+    @Test func csvNeutralizesFormulaInjection() {
+        // Excel/LibreOffice 把 = + - @ 开头的单元格按公式求值（卷名可被
+        // 任何人改写），加 ' 前缀无害化
+        #expect(ScanRecordExporter.escape("=cmd|'/C calc'!A1") == "'=cmd|'/C calc'!A1")
+        #expect(ScanRecordExporter.escape("+SUM(A1)") == "'+SUM(A1)")
+        #expect(ScanRecordExporter.escape("-flag") == "'-flag")
+        #expect(ScanRecordExporter.escape("@risk") == "'@risk")
+    }
+
+    @Test func csvNumberAlwaysUsesDotDecimal() {
+        // 显式钉死 POSIX 区域：即使用户区域是逗号小数也不能输出 "12,5"
+        #expect(ScanRecordExporter.csvNumber(120.5) == "120.5")
+        #expect(ScanRecordExporter.csvNumber(0) == "0.0")
+    }
+
+    @Test func smallDiskCellRowsStopAtDiskEnd() {
+        // totalBlocks < 格子数的小盘：尾部空格子的 firstBlock 已越盘尾，
+        // 不导出"起始块 > 结束块"的反区间行
+        let smallMeta = ScanMeta(diskName: "U盘", bsdName: "disk9",
+                                 diskSizeBytes: 100 * 4096, blockSizeBytes: 4096,
+                                 totalBlocks: 100, warnMs: 100, abnormalMs: 500,
+                                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                                 finishedAt: nil)
+        var cells = Array(repeating: MapCell(status: .normal, elapsedMs: 5, blockIndex: 0), count: 100)
+        for i in 0..<100 { cells[i] = MapCell(status: .normal, elapsedMs: 5, blockIndex: min(i, 99)) }
+        cells += Array(repeating: .unscanned, count: 20)
+        let csv = ScanRecordExporter.csv(meta: smallMeta, summary: ScanSummary(normal: 100),
+                                         cells: cells, anomalies: [])
+        #expect(csv.contains("99,99,99,"))          // 最后一个有效格在
+        #expect(!csv.contains("\n100,100,"))        // 越盘尾的反区间行不出现
+        #expect(!csv.contains("\n119,119,"))
     }
 
     @Test func jsonRoundTrips() throws {
@@ -300,33 +340,37 @@ import Testing
         ScanRecord(blockIndex: block, offsetBytes: offset, elapsedMs: 10, status: status, errno: nil)
     }
 
-    @Test func newWorsenedPersistentResolved() {
+    @Test func newWorsenedImprovedPersistentResolved() {
         let old = [
             rec(1, 128_000, .warning),    // 持续
             rec(2, 256_000, .warning),    // 加重（本次 abnormal）
-            rec(3, 384_000, .abnormal),   // 恢复（本次无异常）
+            rec(3, 384_000, .abnormal),   // 好转（本次 warning，仍异常但更轻）
+            rec(4, 512_000, .abnormal),   // 恢复（本次无异常）
         ]
         let new = [
             rec(1, 128_000, .warning),    // 持续
             rec(2, 256_000, .abnormal),   // 加重
-            rec(9, 512_000, .error),      // 新增
+            rec(3, 384_000, .warning),    // 好转
+            rec(9, 768_000, .error),      // 新增
         ]
         let d = RecordDiff.compute(old: old, new: new)
         #expect(d.newCount == 1)
         #expect(d.worsenedCount == 1)
+        #expect(d.improvedCount == 1)
         #expect(d.persistentCount == 1)
         #expect(d.resolvedCount == 1)
-        // 排序：新增 > 加重 > 持续 > 恢复
-        #expect(d.items.map(\.kind) == [.new, .worsened, .persistent, .resolved])
+        // 排序：新增 > 加重 > 好转 > 持续 > 恢复
+        #expect(d.items.map(\.kind) == [.new, .worsened, .improved, .persistent, .resolved])
     }
 
-    @Test func severityDecreaseCountsAsPersistent() {
+    @Test func severityDecreaseCountsAsImproved() {
         let old = [rec(1, 0, .abnormal)]
         let new = [rec(1, 0, .warning)]
         let d = RecordDiff.compute(old: old, new: new)
-        #expect(d.persistentCount == 1)
+        #expect(d.improvedCount == 1)
         #expect(d.worsenedCount == 0)
         #expect(d.resolvedCount == 0)
+        #expect(d.persistentCount == 0)
     }
 
     @Test func emptyInputs() {
@@ -352,5 +396,195 @@ import Testing
         #expect(parsed.anomalies.count == 1)
         #expect(parsed.anomalies[0].status == .abnormal)
         #expect(parsed.anomalies[0].offsetBytes == 384)
+    }
+}
+
+// MARK: SMART 详情解析（smartctl -j -a JSON → SMARTDetails）
+
+@Suite struct SMARTDetailsParsingTests {
+    /// 结构对照真实抓取：外置 SATA 盘（Seagate Momentus，含 UNC 错误日志）
+    private let ataJSON = """
+    {
+      "device": {"name": "/dev/disk8", "type": "ata", "protocol": "ATA"},
+      "model_name": "ST9500325AS",
+      "serial_number": "S2WE7EY2",
+      "firmware_version": "0005HPM1",
+      "user_capacity": {"blocks": 976773168, "bytes": 500107862016},
+      "rotation_rate": 5400,
+      "form_factor": {"ata_value": 2, "name": "2.5 inches"},
+      "smart_status": {"passed": true},
+      "ata_smart_attributes": {
+        "revision": 16,
+        "table": [
+          {"id": 1, "name": "Raw_Read_Error_Rate", "value": 112, "worst": 93, "thresh": 6,
+           "when_failed": "", "flags": {"value": 15, "string": "POSR--", "prefailure": true},
+           "raw": {"value": 149211375, "string": "149211375"}},
+          {"id": 5, "name": "Reallocated_Sector_Ct", "value": 99, "worst": 99, "thresh": 36,
+           "when_failed": "", "flags": {"value": 50, "string": "PO--CK", "prefailure": true},
+           "raw": {"value": 40, "string": "40"}},
+          {"id": 187, "name": "Reported_Uncorrect", "value": 90, "worst": 95, "thresh": 100,
+           "when_failed": "", "flags": {"value": 18, "string": "-O--C-", "prefailure": false},
+           "raw": {"value": 5, "string": "5"}},
+          {"id": 198, "name": "Offline_Uncorrectable", "value": 100, "worst": 100, "thresh": 0,
+           "when_failed": "FAILING_NOW", "flags": {"value": 0, "string": "----C-", "prefailure": false},
+           "raw": {"value": 0, "string": "0"}}
+        ]
+      },
+      "ata_smart_error_log": {
+        "revision": 1,
+        "summary": {
+          "revision": 1,
+          "device_error_count": 6,
+          "logged_error_count": 1,
+          "table": [
+            {"error_number": 6, "lifetime_hours": 8853,
+             "error_description": "Error: UNC at LBA = 0x0fffffff = 268435455",
+             "completion_registers": {"error": 64, "status": 81, "count": 0, "lba": 16777215}}
+          ]
+        }
+      },
+      "ata_smart_self_testlog": {
+        "revision": 1,
+        "table": [
+          {"index": 1, "type": {"value": 1, "string": "Offline"},
+           "status": {"value": 0, "string": "Completed without error", "passed": true},
+           "lifetime_hours": 900},
+          {"index": 2, "type": {"value": 2, "string": "Short offline"},
+           "status": {"value": 1, "string": "Completed: read failure", "passed": false},
+           "lifetime_hours": 910, "lba_first_error": {"value": 268435455, "string": "268435455"}},
+          {"index": 3, "type": {"value": 0, "string": ""},
+           "status": {"value": 0, "string": ""}, "lifetime_hours": 0}
+        ]
+      }
+    }
+    """
+
+    /// 内置 NVMe 盘（无 smart_status，健康度由 critical_warning 兜底）
+    private let nvmeJSON = """
+    {
+      "device": {"name": "/dev/disk0", "type": "nvme", "protocol": "NVMe"},
+      "model_name": "APPLE SSD AP0512Z",
+      "serial_number": "060231093ca3a02e",
+      "nvme_smart_health_information_log": {
+        "critical_warning": 0, "temperature": 32, "available_spare": 100,
+        "available_spare_threshold": 99, "percentage_used": 0,
+        "data_units_read": 18947871, "data_units_written": 19483178,
+        "host_reads": 192186738, "host_writes": 1185996852,
+        "power_cycles": 116, "power_on_hours": 196, "unsafe_shutdowns": 6,
+        "media_errors": 0, "num_err_log_entries": 0
+      }
+    }
+    """
+
+    private func parse(_ json: String) throws -> SMARTDetails {
+        let obj = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        guard let dict = obj as? [String: Any] else {
+            struct NotDict: Error {}
+            throw NotDict()
+        }
+        return SMARTDetails.parse(json: dict, bsdName: "disk8")
+    }
+
+    @Test func ataDetailsParsedFully() throws {
+        let d = try parse(ataJSON)
+        #expect(d.model == "ST9500325AS")
+        #expect(d.serial == "S2WE7EY2")
+        #expect(d.capacityBytes == 500_107_862_016)
+        #expect(d.rotationRate == 5400)
+        #expect(d.formFactorName == "2.5 inches")
+        #expect(d.health == "PASSED")
+        #expect(d.isNVMe == false)
+        #expect(d.attributes.count == 4)
+    }
+
+    @Test func ataAttributeValuesAndFlags() throws {
+        let d = try parse(ataJSON)
+        let reallocated = d.attributes.first { $0.id == 5 }
+        #expect(reallocated?.rawString == "40")
+        #expect(reallocated?.value == 99)
+        #expect(reallocated?.threshold == 36)
+        #expect(reallocated?.isPrefail == true)
+        #expect(reallocated?.isFailed == false)
+        #expect(reallocated?.isCritical == false)
+
+        // 原始值带后缀的形态（如温度 "24 (0 1 0 0 0)"）原样保留字符串
+        #expect(d.attributes.first { $0.id == 1 }?.rawString == "149211375")
+    }
+
+    @Test func failingAndCriticalRowsAreDetected() throws {
+        let d = try parse(ataJSON)
+        // when_failed = FAILING_NOW → isFailed
+        let uncorrectable = d.attributes.first { $0.id == 198 }
+        #expect(uncorrectable?.isFailed == true)
+
+        // 当前值 90 ≤ 阈值 100 → isCritical（多数盘 when_failed 为空，靠数值兜底）
+        let reported = d.attributes.first { $0.id == 187 }
+        #expect(reported?.isCritical == true)
+        #expect(reported?.isFailed == false)
+    }
+
+    @Test func ataErrorLogAndSelfTestParsed() throws {
+        let d = try parse(ataJSON)
+        #expect(d.errorLog.count == 1)
+        #expect(d.errorLog[0].errorNumber == 6)
+        #expect(d.errorLog[0].lifetimeHours == 8853)
+        #expect(d.errorLog[0].description.contains("UNC at LBA"))
+        #expect(d.errorLogTotalCount == 6)  // 日志只留 5 条，累计 6 次
+
+        // 空槽位（type 为空串）被过滤
+        #expect(d.selfTestLog.count == 2)
+        #expect(d.selfTestLog[0].passed == true)
+        #expect(d.selfTestLog[1].passed == false)
+        #expect(d.selfTestLog[1].lbaFirstError == 268_435_455)
+    }
+
+    @Test func nvmeDetailsParsedWithHealthFallback() throws {
+        let d = try parse(nvmeJSON)
+        #expect(d.isNVMe == true)
+        #expect(d.model == "APPLE SSD AP0512Z")
+        #expect(d.attributes.isEmpty)
+        #expect(d.errorLog.isEmpty)
+        let h = try #require(d.nvmeHealth)
+        #expect(h.temperatureC == 32)
+        #expect(h.percentageUsed == 0)
+        #expect(h.dataUnitsWritten == 19_483_178)
+        #expect(h.unsafeShutdowns == 6)
+        #expect(h.mediaErrors == 0)
+        // JSON 无 smart_status：critical_warning == 0 → PASSED 兜底
+        #expect(d.health == "PASSED")
+    }
+
+    @Test func missingDeviceYieldsEmptyDetails() throws {
+        // 设备不存在/刚拔出：smartctl 仍输出合法 JSON 但无有效字段
+        let d = try parse("""
+        {
+          "smartctl": {
+            "exit_status": 1,
+            "messages": [{"string": "/dev/disk8: Unable to detect device type", "severity": "error"}]
+          }
+        }
+        """)
+        #expect(d.attributes.isEmpty)
+        #expect(d.nvmeHealth == nil)
+        #expect(d.model == nil)
+        // readDetails() 会据此返回 .failure 并透传 smartctl 报错文本
+    }
+}
+
+// MARK: SMART 详情展示格式化（原始值千分位等）
+
+@Suite struct SMARTRawDisplayTests {
+    @Test func groupsOnlyLeadingNumbers() {
+        #expect(SMARTDetailsSheet.formatLeadingNumber("149211375") == "149,211,375")
+        #expect(SMARTDetailsSheet.formatLeadingNumber("8866") == "8,866")
+        // 前导数字不足 4 位不加分组符
+        #expect(SMARTDetailsSheet.formatLeadingNumber("40") == "40")
+        #expect(SMARTDetailsSheet.formatLeadingNumber("24") == "24")
+        // 带后缀注释的原始值：只格式化前导部分，后缀原样保留
+        #expect(SMARTDetailsSheet.formatLeadingNumber("24 (0 1 0 0 0)") == "24 (0 1 0 0 0)")
+        #expect(SMARTDetailsSheet.formatLeadingNumber("2263 (168 229 0)") == "2,263 (168 229 0)")
+        // 空串与非数字开头原样返回
+        #expect(SMARTDetailsSheet.formatLeadingNumber("") == "")
+        #expect(SMARTDetailsSheet.formatLeadingNumber("abc123") == "abc123")
     }
 }

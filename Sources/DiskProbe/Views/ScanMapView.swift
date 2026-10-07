@@ -134,8 +134,26 @@ struct ScanMapView: View {
         var id: BlockStatus { status }
     }
 
+    /// statusPaths 的记忆化缓存：地图 6000 格的 Path 构建是 O(cells) 重活，
+    /// 而鼠标移动（hover 状态变化）会高频触发 body 重估——输入（格子/尺寸/
+    /// 变换）不变时直接复用上次结果，只在扫描快照或平移缩放时重建。
+    private struct PathCache {
+        var cells: [MapCell]
+        var size: CGSize
+        var zoom: CGFloat
+        var offset: CGSize
+        var paths: [StatusPath]
+    }
+    @State private var pathCache: PathCache? = nil
+
     private func statusPaths(size: CGSize, transform: CGAffineTransform) -> [StatusPath] {
         let cells = appState.mapCells
+        let cacheKey = PathCache(cells: cells, size: size, zoom: zoom, offset: offset, paths: [])
+        if let cache = pathCache,
+           cache.cells == cacheKey.cells, cache.size == size,
+           cache.zoom == zoom, cache.offset == offset {
+            return cache.paths
+        }
         let cols = appState.mapColumns
         guard !cells.isEmpty, cols > 0 else { return [] }
         let rows = (cells.count + cols - 1) / cols
@@ -155,11 +173,13 @@ struct ScanMapView: View {
         }
 
         // 固定按 BlockStatus 顺序输出，保证 ForEach 身份稳定
-        return BlockStatus.allCases.compactMap { status in
+        let paths = BlockStatus.allCases.compactMap { status -> StatusPath? in
             guard var path = grouped[status] else { return nil }
             path = path.applying(transform)
             return StatusPath(status: status, path: path, color: statusColor(status))
         }
+        pathCache = PathCache(cells: cells, size: size, zoom: zoom, offset: offset, paths: paths)
+        return paths
     }
 
     /// 悬停格高亮描边（线宽不随缩放变化）
@@ -337,6 +357,9 @@ struct ScanMapView: View {
         guard row >= 0, row < rows, col >= 0, col < cols else { hover = nil; return }
         let idx = row * cols + col
         guard idx < total else { hover = nil; return }
+        // 只在跨越格子边界时写状态：鼠标在同一格内移动是 60-125Hz 的高频事件，
+        // 每次 body 重估都会触发整树 diff
+        guard hover?.index != idx else { return }
         hover = (idx, p)
     }
 

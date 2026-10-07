@@ -116,13 +116,19 @@ struct SettingsView: View {
     }
 
     private func commit() {
-        // 保证 warn < abnormal；非法输入回退到当前生效值
-        guard let w = Double(warnText), let a = Double(abnormalText) else {
+        // 严格校验：Double() 会成功解析 "inf"/"nan"/"1e999"/"0x10"——inf 会让
+        // classify 永不告警（坏盘静默显示全绿），nan 会把警告阈值夹成 1（全盘
+        // 警告）。非有限值/越界值一律回退到当前生效值。
+        func parse(_ s: String) -> Double? {
+            guard let v = Double(s), v.isFinite, v >= 1, v <= 3_600_000 else { return nil }
+            return v
+        }
+        guard let w = parse(warnText), let a = parse(abnormalText) else {
             warnText = String(format: "%.0f", thresholdWarnMs)
             abnormalText = String(format: "%.0f", thresholdAbnormalMs)
             return
         }
-        let clampedWarn = max(1, w)
+        let clampedWarn = w
         let clampedAbnormal = max(clampedWarn + 1, a)
         thresholdWarnMs = clampedWarn
         thresholdAbnormalMs = clampedAbnormal

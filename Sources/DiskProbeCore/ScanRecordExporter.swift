@@ -43,6 +43,9 @@ public enum ScanRecordExporter {
             let per = (m.totalBlocks + cells.count - 1) / cells.count
             for (i, c) in cells.enumerated() {
                 let firstBlock = i * per
+                // 小盘（totalBlocks < 格子数）尾部是空格子：firstBlock 已越过盘尾，
+                // 导出"起始块 > 结束块"的反区间行只会污染数据，直接跳过
+                if firstBlock >= m.totalBlocks { break }
                 let lastBlock = min(m.totalBlocks, (i + 1) * per) - 1
                 let offset = Int64(firstBlock) * m.blockSizeBytes
                 let scanned = c.blockIndex >= 0
@@ -87,16 +90,26 @@ public enum ScanRecordExporter {
 
     // MARK: helpers
 
-    /// 小数统一一位，避免区域设置输出逗号小数点破坏 CSV
-    private static func csvNumber(_ v: Double) -> String {
-        String(format: "%.1f", v)
+    /// 小数统一一位。必须显式钉死 POSIX 区域：`String(format:)` 裸用会按
+    /// 用户区域渲染，逗号小数区域（德/法/俄等）输出 `12,5`，把 CSV 拆列错位。
+    static func csvNumber(_ v: Double) -> String {
+        String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), v)
     }
 
-    private static func escape(_ s: String) -> String {
-        if s.contains(",") || s.contains("\"") || s.contains("\n") {
-            return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    /// CSV 字段转义 + 公式注入防护。
+    /// 引号规则：含逗号/引号/换行（含 \r）时整段加引号。
+    /// 注入规则：Excel/LibreOffice 会把以 = + - @ 开头的单元格按公式求值
+    /// （卷名可被任何人改写），统一加 `'` 前缀无害化——这是数据行里唯一的
+    /// 自由文本入口。
+    static func escape(_ s: String) -> String {
+        var value = s
+        if let first = value.first, "=+-@".contains(first) {
+            value = "'" + value
         }
-        return s
+        if value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r") {
+            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return value
     }
 
     static var dateFormatter: DateFormatter = {

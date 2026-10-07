@@ -56,10 +56,15 @@ final class AppState: ObservableObject {
 
     @Published var thresholds: ScanThresholds = {
         let defaults = UserDefaults.standard
-        return ScanThresholds(
-            warnMs: defaults.object(forKey: "scan.warnMs") as? Double ?? 100,
-            abnormalMs: defaults.object(forKey: "scan.abnormalMs") as? Double ?? 500
-        )
+        // 消毒：历史版本可能把 inf/nan 持久化进来（设置输入曾放行 1e999），
+        // inf 会让 classify 永不告警——坏盘静默显示全绿
+        func sane(_ raw: Double?, _ fallback: Double) -> Double {
+            guard let v = raw, v.isFinite, v >= 1, v <= 3_600_000 else { return fallback }
+            return v
+        }
+        let warn = sane(defaults.object(forKey: "scan.warnMs") as? Double, 100)
+        let abnormal = max(warn + 1, sane(defaults.object(forKey: "scan.abnormalMs") as? Double, 500))
+        return ScanThresholds(warnMs: warn, abnormalMs: abnormal)
     }() {
         didSet {
             // 去抖同步给引擎：快速连续调整时只有最后一次生效，避免乱序覆盖
@@ -143,6 +148,10 @@ final class AppState: ObservableObject {
         Task { await refreshDisks() }
         scheduleUpdateCheck()
         helperStatus = currentInstallStatus()
+        // 属性 didSet 在初始化器里不触发：把（可能来自 UserDefaults、已经
+        // 消毒的）阈值显式同步给引擎，否则引擎永远用默认值
+        let initialThresholds = thresholds
+        Task { await engine.updateThresholds(initialThresholds) }
         // 无头模式：`open DiskProbe.app --args --register-helper` 注册完自动退出，
         // 用于脚本化安装/诊断（与点击"安装特权助手"完全同一条代码路径）
         if CommandLine.arguments.contains("--register-helper") {
@@ -176,10 +185,11 @@ final class AppState: ObservableObject {
 
     /// 手动检查（菜单项）失败时弹窗提示；静默检查失败不声不响。
     /// 发现有更新：设置 availableUpdate（主窗口横幅展示）。
+    /// 时间戳只在检查成功后写入——失败（网络瞬断等）不盖章，当天仍可重试。
     func checkForUpdates(manual: Bool) async throws {
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.updateLastCheckKey)
         do {
             guard let update = try await UpdateChecker.fetchLatest() else {
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.updateLastCheckKey)
                 if manual {
                     let alert = NSAlert()
                     alert.messageText = tr("当前已是最新版本", "You're up to date")
@@ -189,6 +199,7 @@ final class AppState: ObservableObject {
                 }
                 return
             }
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.updateLastCheckKey)
             availableUpdate = update
             if manual, let url = URL(string: update.url) {
                 NSWorkspace.shared.open(url)
@@ -395,14 +406,21 @@ final class AppState: ObservableObject {
     }
 
     // MARK: 磁盘列表
+    /// 刷新请求序号：连点刷新时旧枚举的慢结果不允许覆盖新结果
+    private var diskRequestID = 0
+
     func refreshDisks() async {
+        diskRequestID += 1
+        let requestID = diskRequestID
         isEnumerating = true
         enumerateError = nil
         let result = await Task.detached(priority: .userInitiated) { DiskEnumerator.enumerate() }.value
+        guard requestID == diskRequestID else { return }
         disks = result
-        // 选中盘可能已被拔掉：只有在结果里仍存在时才保留，否则回退到默认选择
-        if let current = selectedDisk, result.contains(current) {
-            // 保留当前选择
+        // 选中盘可能已被拔掉：按 bsdName 匹配（不能用 DiskInfo 全字段判等，
+        // 卷名变化会把选中盘"判丢"），命中则更新为新信息（displayName 可能已变）
+        if let current = selectedDisk, let fresh = result.first(where: { $0.id == current.id }) {
+            selectedDisk = fresh
         } else {
             selectedDisk = result.first(where: { $0.isExternalPhysical }) ?? result.first
         }
@@ -436,6 +454,51 @@ final class AppState: ObservableObject {
         case .failure(let err):
             // 保留上一次成功的数据，瞬时失败不至于闪空
             smartError = err.localizedDescription
+        }
+    }
+
+    // MARK: SMART 详情（详情 sheet）
+
+    @Published var smartDetails: SMARTDetails? = nil
+    @Published var showSMARTDetails = false
+    @Published var isLoadingSMARTDetails = false
+    @Published var smartDetailsError: String? = nil
+    /// 与 smartRequestID 分开：详情 sheet 的请求生命周期独立于摘要条
+    private var smartDetailsRequestID = 0
+
+    /// 打开详情 sheet 并实时读取。每次打开都重读（SMART 数据可能随时变化），
+    /// 不做缓存；sheet 内的「刷新」按钮走同一条路。
+    func openSMARTDetails() {
+        showSMARTDetails = true
+        Task { await loadSMARTDetails() }
+    }
+
+    func loadSMARTDetails() async {
+        guard let disk = selectedDisk else {
+            smartDetails = nil
+            smartDetailsError = nil
+            isLoadingSMARTDetails = false
+            return
+        }
+        // 请求序号：连点刷新/切盘后，旧请求的慢结果不允许覆盖新数据
+        smartDetailsRequestID += 1
+        let requestID = smartDetailsRequestID
+        isLoadingSMARTDetails = true
+        smartDetailsError = nil
+
+        let result = await Task.detached(priority: .userInitiated) {
+            await SMARTReader.readDetails(bsdName: disk.bsdName)
+        }.value
+
+        guard requestID == smartDetailsRequestID, disk.id == selectedDisk?.id else { return }
+        isLoadingSMARTDetails = false
+        switch result {
+        case .success(let details):
+            smartDetails = details
+            smartDetailsError = nil
+        case .failure(let err):
+            // 保留上一次成功的数据，瞬时失败不至于闪空
+            smartDetailsError = err.localizedDescription
         }
     }
 
@@ -487,15 +550,21 @@ final class AppState: ObservableObject {
 
     private func runRecordCompare(url: URL) async {
         do {
-            let data = try Data(contentsOf: url)
-            let old = try ScanRecordExporter.parseJSON(data)
             let snapshot = await engine.exportSnapshot()
-            if let oldBSD = old.meta?.bsdName, oldBSD != snapshot.meta?.bsdName {
+            // 读文件/解码/双字典对齐都可能很重（濒死盘几十万条异常）：
+            // 全部放到后台线程，主线程只接收结果
+            let (parsed, diff) = try await Task.detached(priority: .userInitiated) { () -> (ScanRecordFile, RecordDiff) in
+                let data = try Data(contentsOf: url)
+                let old = try ScanRecordExporter.parseJSON(data)
+                let computed = RecordDiff.compute(old: old.anomalies, new: snapshot.anomalies)
+                return (old, computed)
+            }.value
+            if let oldBSD = parsed.meta?.bsdName, oldBSD != snapshot.meta?.bsdName {
                 authError = tr("所选记录属于 /dev/\(oldBSD)，与当前扫描盘不一致，无法对比。", "That report belongs to /dev/\(oldBSD), not the scanned disk; cannot compare.")
                 return
             }
-            recordDiff = RecordDiff.compute(old: old.anomalies, new: snapshot.anomalies)
-            recordDiffOldFile = old
+            recordDiff = diff
+            recordDiffOldFile = parsed
             recordDiffCurrentMeta = snapshot.meta
             showRecordDiff = true
         } catch {
@@ -521,11 +590,11 @@ final class AppState: ObservableObject {
             panel.nameFieldStringValue = Self.applyingExtension(baseName, ext: extensions[index])
         }
 
-        let label = NSTextField(labelWithString: "格式:")
+        let label = NSTextField(labelWithString: tr("格式:", "Format:"))
         label.frame = NSRect(x: 0, y: 6, width: 38, height: 17)
         label.alignment = .right
         let popup = NSPopUpButton(frame: NSRect(x: 42, y: 2, width: 230, height: 26))
-        popup.addItems(withTitles: ["CSV（表格分析）", "JSON（完整报告）"])
+        popup.addItems(withTitles: [tr("CSV（表格分析）", "CSV (spreadsheet)"), tr("JSON（完整报告）", "JSON (full report)")])
         popup.target = formatHandler
         popup.action = #selector(FormatPopupHandler.selectionChanged(_:))
 
@@ -536,6 +605,8 @@ final class AppState: ObservableObject {
 
         panel.allowedContentTypes = [.commaSeparatedText]
         panel.nameFieldStringValue = baseName + ".csv"
+        panel.message = tr("CSV 适合表格分析；JSON 为完整报告（含地图快照）。在下方格式菜单中选择类型。",
+                           "CSV suits spreadsheet analysis; JSON is the full report (with map snapshot). Pick the type in the menu below.")
 
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
@@ -561,16 +632,19 @@ final class AppState: ObservableObject {
     private func writeRecord(to url: URL, format: RecordFormat) async {
         let snapshot = await engine.exportSnapshot()
         do {
-            switch format {
-            case .json:
-                let data = try ScanRecordExporter.json(meta: snapshot.meta, summary: snapshot.summary,
+            // CSV/JSON 编码在超大报告上是重活（几十万行拼串）：放后台线程
+            let data: Data = try await Task.detached(priority: .userInitiated) {
+                switch format {
+                case .json:
+                    return try ScanRecordExporter.json(meta: snapshot.meta, summary: snapshot.summary,
                                                        cells: snapshot.cells, anomalies: snapshot.anomalies)
-                try data.write(to: url, options: .atomic)
-            case .csv:
-                let csv = ScanRecordExporter.csv(meta: snapshot.meta, summary: snapshot.summary,
-                                                 cells: snapshot.cells, anomalies: snapshot.anomalies)
-                try csv.write(to: url, atomically: true, encoding: .utf8)
-            }
+                case .csv:
+                    let csv = ScanRecordExporter.csv(meta: snapshot.meta, summary: snapshot.summary,
+                                                     cells: snapshot.cells, anomalies: snapshot.anomalies)
+                    return Data(csv.utf8)
+                }
+            }.value
+            try data.write(to: url, options: .atomic)
             saveSuccessMessage = tr("检测记录已保存：\(url.lastPathComponent)", "Report saved: \(url.lastPathComponent)")
         } catch {
             authError = tr("保存检测记录失败：\(error.localizedDescription)", "Failed to save the report: \(error.localizedDescription)")
@@ -595,8 +669,8 @@ final class AppState: ObservableObject {
         // 初始化地图
         mapCells = Array(repeating: .unscanned, count: mapColumns * mapRows)
 
-        // 取消旧监听，保证进度流始终只有一个消费者
-        listenerTask?.cancel()
+        // 注意不要在这里取消旧 listenerTask：若引擎已在扫描（重复确认/连点），
+        // engine.start 会失败，旧消费者必须活着，否则进度流无人消费、地图冻结
         requestScanNotificationPermission()
         listenerTask = Task {
             refreshHelperStatus()
@@ -611,12 +685,19 @@ final class AppState: ObservableObject {
                 blockSize: Int64(blockSizeKB) * 1024,
                 cellCount: mapColumns * mapRows
             )
-            guard started else {
-                authError = await engine.takeLastAuthError() ?? tr("无法开始扫描。", "Unable to start the scan.")
+            if started {
+                await listenProgress()
+                return
+            }
+            // start 失败的三种情形：已在扫描（接回现有状态，不当作错误）、
+            // begin 窗口期内被用户停止、真正的启动错误
+            let state = await engine.state
+            if state == .scanning || state == .paused || state == .stopped {
                 await syncState()
                 return
             }
-            await listenProgress()
+            authError = await engine.takeLastAuthError() ?? tr("无法开始扫描。", "Unable to start the scan.")
+            await syncState()
         }
     }
 
@@ -627,11 +708,14 @@ final class AppState: ObservableObject {
         Task { await engine.resume(); await syncState() }
     }
     func stopScan() {
-        // 停止 = 本次扫描作废：立即清空进度/地图/统计，不再显示停止前的残留
-        listenerTask?.cancel()
-        listenerTask = nil
-        resetScanDisplay()
         Task {
+            // 只在真的有扫描在跑时才清显示：自然扫完瞬间点停止若把
+            // resultsDiskID 清掉，已完成的结果会从 UI 上消失且无法导出
+            let state = await engine.state
+            guard state == .scanning || state == .paused else { return }
+            listenerTask?.cancel()
+            listenerTask = nil
+            resetScanDisplay()
             await engine.stop()
             await syncState()
         }
@@ -652,8 +736,12 @@ final class AppState: ObservableObject {
             await syncState()
         }
         await syncState()
-        // 只有自然扫完才通知；用户主动停止（.stopped）不打扰
-        if await engine.state == .finished {
+        // 循环退出（helper 断开/崩溃/扫描中重装助手）后引擎可能处于 .error，
+        // 错误原因只在引擎里：取出来展示，否则用户只看到一个"出错"徽章
+        let state = await engine.state
+        if state == .error {
+            authError = await engine.takeLastAuthError() ?? authError
+        } else if state == .finished {
             notifyScanFinished()
         }
     }

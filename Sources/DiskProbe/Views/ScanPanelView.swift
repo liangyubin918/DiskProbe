@@ -17,6 +17,11 @@ struct ScanPanelView: View {
 
             // SMART 摘要条（温度/健康/通电时间等）
             SMARTSummaryBar()
+                // 详情 sheet 挂在摘要条节点上（与下方 RecordDiff 的 sheet 分属
+                // 不同节点：macOS 11 上同一视图的多个 sheet 只有一个会生效）
+                .sheet(isPresented: $appState.showSMARTDetails) {
+                    SMARTDetailsSheet()
+                }
             Divider()
 
             ScanControlBar(

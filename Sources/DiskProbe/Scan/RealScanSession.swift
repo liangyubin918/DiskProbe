@@ -77,17 +77,26 @@ final class RealScanSession: NSObject, HelperClientProtocol {
     }
 
     func pause() {
-        let proxy = connection?.remoteObjectProxy as? HelperScanProtocol
+        lock.lock()
+        let conn = connection
+        lock.unlock()
+        let proxy = conn?.remoteObjectProxy as? HelperScanProtocol
         proxy?.pauseScan()
     }
 
     func resume() {
-        let proxy = connection?.remoteObjectProxy as? HelperScanProtocol
+        lock.lock()
+        let conn = connection
+        lock.unlock()
+        let proxy = conn?.remoteObjectProxy as? HelperScanProtocol
         proxy?.resumeScan()
     }
 
     func stop() {
-        let proxy = connection?.remoteObjectProxy as? HelperScanProtocol
+        lock.lock()
+        let conn = connection
+        lock.unlock()
+        let proxy = conn?.remoteObjectProxy as? HelperScanProtocol
         proxy?.stopScan()
     }
 
@@ -120,9 +129,10 @@ final class RealScanSession: NSObject, HelperClientProtocol {
         guard let batch = BatchCodec.decode(data) else { return }
         lock.lock()
         let done = finished
+        let cont = continuation
         lock.unlock()
         guard !done else { return }
-        continuation?.yield(batch)
+        cont?.yield(batch)
     }
 
     func onDone(_ errorMessage: String?) {
@@ -130,13 +140,23 @@ final class RealScanSession: NSObject, HelperClientProtocol {
     }
 
     private func finish(error: String?) {
+        var shouldInvalidate = false
         lock.lock()
-        defer { lock.unlock() }
-        guard !finished else { return }
-        finished = true
-        if let error { lastError = error }
-        continuation?.finish()
-        continuation = nil
+        if !finished {
+            finished = true
+            if let error { lastError = error }
+            continuation?.finish()
+            continuation = nil
+            shouldInvalidate = true
+        }
+        lock.unlock()
+        // 失败/结束路径也要断开连接：session↔connection 保留环不失效则永不
+        // 释放（每次 begin 失败泄一对连接），ack 超时放弃后 helper 还可能
+        // 继续无人消费的扫描。必须在锁外失效——invalidate 可能同步触发
+        // invalidationHandler → finish()，锁内调用会自锁。重复失效安全。
+        if shouldInvalidate {
+            connection?.invalidate()
+        }
     }
 
     // MARK: 健康检查

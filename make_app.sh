@@ -105,8 +105,8 @@ cat > "$APP_BUNDLE/Contents/Library/LaunchDaemons/local.diskprobe.helper.plist" 
     <array>
         <string>local.diskprobe</string>
     </array>
-    <key>StandardErrorPath</key><string>/tmp/diskprobe-helper.err</string>
-    <key>StandardOutPath</key><string>/tmp/diskprobe-helper.out</string>
+    <key>StandardErrorPath</key><string>/Library/Logs/DiskProbe-helper.err</string>
+    <key>StandardOutPath</key><string>/Library/Logs/DiskProbe-helper.out</string>
 </dict>
 </plist>
 PLIST

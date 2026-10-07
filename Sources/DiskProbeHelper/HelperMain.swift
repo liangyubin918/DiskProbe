@@ -15,6 +15,27 @@ import Darwin
 //   3. 只读：设备以 O_RDONLY 打开；接口层没有任何写语义的方法。
 //   4. 所有连接断开后空闲 60 秒自动退出，把进程还给 launchd。
 
+/// 全局扫描互斥闸门：helper 进程同一时刻只允许一个扫描在跑。
+/// busy 检查放在进程级而非 per-connection 的 ScanRunner 上——否则两个
+/// app 实例（同签名）各开一条连接就能对同一块盘并发扫，磁头打架导致
+/// 坏道耗时全部失真。
+final class ScanGate {
+    private let lock = NSLock()
+    private var busy = false
+
+    /// 尝试占用；false = 已有扫描在进行
+    func tryAcquire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if busy { return false }
+        busy = true
+        return true
+    }
+
+    func release() {
+        lock.lock(); busy = false; lock.unlock()
+    }
+}
+
 final class ScanRunner: NSObject, HelperScanProtocol {
     // fd / 停止 / 暂停 / 连接被 XPC 连接队列和扫描队列并发访问，必须加锁
     private let lock = NSLock()
@@ -22,12 +43,17 @@ final class ScanRunner: NSObject, HelperScanProtocol {
     private var stopFlag = false
     private var pauseFlag = false
     private var didReportDone = false
+    private var gateAcquired = false
+    private weak var gate: ScanGate?
     private weak var connection: NSXPCConnection?
 
     /// 由 delegate 在接受连接时挂接（connection 通过 exportedObject 强持有 runner，
-    /// runner 用 weak 反向引用避免环）
-    func attach(_ connection: NSXPCConnection) {
-        lock.lock(); self.connection = connection; lock.unlock()
+    /// runner 用 weak 反向引用避免环）。gate 是进程级单例，强引用语义由 delegate 持有。
+    func attach(_ connection: NSXPCConnection, gate: ScanGate?) {
+        lock.lock()
+        self.connection = connection
+        self.gate = gate
+        lock.unlock()
     }
 
     func detach() {
@@ -45,16 +71,24 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         let busy = fd != -1
         lock.unlock()
         guard !busy else { reply(tr("扫描已在进行中", "A scan is already in progress")); return }
+        // 进程级互斥：跨连接/跨 app 实例也只允许一个扫描
+        guard let gate, gate.tryAcquire() else {
+            reply(tr("扫描已在进行中", "A scan is already in progress"))
+            return
+        }
         guard blockSize >= 512, blockSize <= 4 * 1024 * 1024 else {
+            gate.release()
             reply(tr("块大小超出允许范围（512B–4MB）", "Block size out of allowed range (512B–4MB)"))
             return
         }
         if let problem = Self.deviceProblem(devicePath) {
+            gate.release()
             reply(problem)
             return
         }
         let newFD = open(devicePath, O_RDONLY)
         guard newFD >= 0 else {
+            gate.release()
             // root 也会被 TCC 拦：读取裸设备需要完全磁盘访问权限（Full Disk Access）
             if errno == EPERM {
                 reply(tr("[TCC] macOS 隐私保护拦截了裸设备读取。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 DiskProbe（App），然后重新扫描。若仍失败，把 helper 二进制（DiskProbe.app/Contents/Library/LaunchServices/local.diskprobe.helper）也加入列表。", "[TCC] macOS privacy protection blocked raw-device access. Add DiskProbe (the app) under System Settings → Privacy & Security → Full Disk Access, then scan again. If it still fails, also add the helper binary (DiskProbe.app/Contents/Library/LaunchServices/local.diskprobe.helper)."))
@@ -67,6 +101,7 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         guard fcntl(newFD, F_NOCACHE, 1) == 0 else {
             let msg = String(cString: strerror(errno))
             close(newFD)
+            gate.release()
             reply(tr("设置 F_NOCACHE 失败：\(msg)", "Failed to set F_NOCACHE: \(msg)"))
             return
         }
@@ -76,6 +111,7 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         stopFlag = false
         pauseFlag = false
         didReportDone = false
+        gateAcquired = true
         lock.unlock()
         let size = Int(blockSize)
         reply(nil)
@@ -200,6 +236,9 @@ final class ScanRunner: NSObject, HelperScanProtocol {
                 if bestElapsed == nil || lastElapsed < bestElapsed! {
                     bestElapsed = lastElapsed
                 }
+                // 任一尝试成功即清错误标志：lastErrno 只反映"最后一次尝试"，
+                // 不清除会把"1 次抖动 + 1 次成功"误标成坏块（与下方判定矛盾）
+                lastErrno = 0
                 // 快块一次定论；慢块复检剔除抖动
                 if bestElapsed! < Self.verifyThresholdMs || attempt == Self.maxAttempts - 1 {
                     break
@@ -236,7 +275,11 @@ final class ScanRunner: NSObject, HelperScanProtocol {
         if fd >= 0 { close(fd); fd = -1 }
         let already = didReportDone
         didReportDone = true
+        let releaseGate = gateAcquired
+        gateAcquired = false
         lock.unlock()
+        // 无论扫描成败都要归还闸门，否则进程级互斥会把后续所有扫描拒之门外
+        if releaseGate { gate?.release() }
         guard !already else { return }
         proxy?.onDone(error)
     }
@@ -273,6 +316,7 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
     private let lock = NSLock()
     private var connectionCount = 0
     private var idleExitWork: DispatchWorkItem?
+    private let gate = ScanGate()
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
         guard verifyClient(newConnection) else {
@@ -281,9 +325,9 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
         }
         cancelIdleExit()
         // runner 由 connection 通过 exportedObject 强引用持有，随连接失效而释放；
-        // 支持多个连接并存（但每次 startScan 前 ScanRunner 会拒绝并发扫描）
+        // 支持多个连接并存，但并发扫描被进程级 ScanGate 拒绝
         let runner = ScanRunner()
-        runner.attach(newConnection)
+        runner.attach(newConnection, gate: gate)
         lock.lock()
         connectionCount += 1
         lock.unlock()
@@ -348,14 +392,16 @@ final class HelperDelegate: NSObject, NSXPCListenerDelegate {
 
         let clientID = signingIdentifier(client)
         guard let clientID, clientID == HelperIdentifiers.appIdentifier else {
-            NSLog("[DiskProbeHelper] 校验失败：identifier 不匹配（实际 \(clientID ?? "nil")）")
+            // 客户端可控的字符串绝不能进格式串（NSLog 的插值结果会被当
+            // 格式串解释，%x 会把 root 进程栈内存展开进日志）
+            NSLog("[DiskProbeHelper] 校验失败：identifier 不匹配（实际 %@）", clientID ?? "nil")
             return false
         }
         // 双方都必须由同一团队签名（ad-hoc 没有 OU，直接拒绝）
         let clientTeam = signingTeam(client)
         let selfTeam = selfCode().flatMap(signingTeam)
         guard let clientTeam, let selfTeam, clientTeam == selfTeam else {
-            NSLog("[DiskProbeHelper] 校验失败：团队不匹配（client=\(clientTeam ?? "nil") self=\(selfTeam ?? "nil")）")
+            NSLog("[DiskProbeHelper] 校验失败：团队不匹配（client=%@ self=%@）", clientTeam ?? "nil", selfTeam ?? "nil")
             return false
         }
         fputs("[DiskProbeHelper] 接受连接：identifier=\(clientID) team=\(clientTeam)\n", stderr)

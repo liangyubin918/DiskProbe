@@ -78,11 +78,32 @@ actor ScanEngine {
             lastAuthError = tr("磁盘容量或块大小无效。", "Invalid disk capacity or block size.")
             return false
         }
+        // 立即占位：begin() 可能等待 helper 冷启动数秒，期间二次 start
+        // 必须被这里的 state 挡下（否则两条 root 级读盘流并发，磁头打架，
+        // 坏道耗时全部失真）。
+        state = .scanning
+        stopRequested = false
+        pauseRequested = false
 
         let session = RealScanSession()
         guard let batchStream = await session.begin(bsdName: disk.bsdName, blockSize: UInt64(blockSize)) else {
+            session.close()
+            // begin 窗口期内用户可能点了停止：尊重它，不当错误报
+            if stopRequested {
+                stopRequested = false
+                state = .stopped
+                return false
+            }
             state = .error
             lastAuthError = session.lastError ?? tr("无法连接特权助手。若已安装仍失败，请在 app 内点「重装特权助手」重新注册后重试。", "Cannot reach the privileged helper. If it is installed but still failing, click Reinstall Privileged Helper in the app, then retry.")
+            return false
+        }
+        if stopRequested {
+            // begin 窗口期内点了停止：宁可白等也不开扫
+            session.stop()
+            session.close()
+            stopRequested = false
+            state = .stopped
             return false
         }
         realSession = session
@@ -96,8 +117,6 @@ actor ScanEngine {
         self.cellCount = max(1, cellCount)
         self.cellsPerGroup = Self.cellsPerBlockGroup(totalBlocks: self.totalBlocks, cellCount: self.cellCount)
         self.map = Array(repeating: .unscanned, count: self.cellCount)
-        self.stopRequested = false
-        self.pauseRequested = false
         self.speedSamples = []
         self.anomalies = []
         self.finalSummary = nil
@@ -113,7 +132,6 @@ actor ScanEngine {
         let (stream, continuation) = AsyncStream<ScanProgress>.makeStream(of: ScanProgress.self, bufferingPolicy: .bufferingNewest(1))
         progressAsyncStream = stream
         progressStream = continuation
-        state = .scanning
 
         let runID = UUID()
         currentRunID = runID
@@ -136,9 +154,11 @@ actor ScanEngine {
     }
 
     func stop() {
-        guard currentRunID != nil else { return }
+        // 先置标志：begin() 窗口期内（currentRunID 还是 nil）的停止由 start()
+        // 在窗口结束时检查并尊重，不会丢
         stopRequested = true
         pauseRequested = false
+        guard currentRunID != nil else { return }
         realSession?.stop()
         // 停止后立刻断开并释放会话，不让 XPC 连接悬到下次扫描
         realSession?.close()
@@ -163,6 +183,10 @@ actor ScanEngine {
     /// 频率在主线程重建 6000 格地图并整树刷新 SwiftUI，主线程被打满后菜单栏等
     /// 前台交互全部饿死（GitHub issue #1）。进度是全量快照，丢弃中间事件不影响正确性。
     static let progressMinIntervalNanos: UInt64 = 100_000_000
+
+    /// 异常块明细的收录上限（濒死盘可报出百万级异常块，明细封顶防内存膨胀；
+    /// 汇总统计 summary 独立计数，不受影响）
+    static let maxAnomalies = 100_000
 
     /// 真实扫描：消费 helper 回传的批次流，复用与演示扫描相同的
     /// 分类/统计/地图/速度逻辑。
@@ -234,9 +258,13 @@ actor ScanEngine {
                 map[cellIndex] = Self.mergedCell(map[cellIndex], status: block.status,
                                                  elapsedMs: block.elapsedMs, blockIndex: i)
                 if block.status != .normal {
-                    anomalies.append(ScanRecord(blockIndex: i, offsetBytes: offset,
-                                                elapsedMs: elapsedMs, status: block.status,
-                                                errno: failed ? batch.errnos[k] : nil))
+                    // 濒死盘可能报出几十万~百万级异常块：明细封顶防内存膨胀，
+                    // 汇总统计不受影响（summary 独立计数）
+                    if anomalies.count < Self.maxAnomalies {
+                        anomalies.append(ScanRecord(blockIndex: i, offsetBytes: offset,
+                                                    elapsedMs: elapsedMs, status: block.status,
+                                                    errno: failed ? batch.errnos[k] : nil))
+                    }
                 }
                 lastBlock = block
             }
@@ -250,6 +278,15 @@ actor ScanEngine {
         }
 
         guard isCurrent(runID) else { return }
+        // 完整性兜底：helper 正常扫完时每个 totalBlocks 都应有记录；批次流
+        // 缓冲溢出丢批（极端调度饥饿）会导致 scanned < totalBlocks，此时
+        // 结果不完整，明确报错而不是让用户拿半份数据当全量结论。
+        if scanned < totalBlocks {
+            lastAuthError = tr("扫描结果不完整：仅收到 \(scanned)/\(totalBlocks) 块（进度流异常中断），请重新扫描。",
+                               "Incomplete scan: only \(scanned)/\(totalBlocks) blocks received (progress stream ended early). Rescan required.")
+            finish(runID: runID, state: .error)
+            return
+        }
         // 补发最终快照：最后一批可能因节流未推送，保证收尾时进度/统计完整
         if let last = lastBlock {
             yieldProgress(lastBlock: last, scanned: scanned, summary: summary,

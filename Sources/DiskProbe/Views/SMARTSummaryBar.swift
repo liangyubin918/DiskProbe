@@ -56,6 +56,7 @@ struct SMARTSummaryBar: View {
 
 private struct SMARTContent: View {
     let info: SMARTInfo
+    @EnvironmentObject var appState: AppState
 
     /// 风险指标（任一被盘支持才显示第二行）：
     /// ATA 重映射/待映射/无法校正扇区 + 接口 CRC；NVMe 介质错误。
@@ -110,6 +111,14 @@ private struct SMARTContent: View {
                     Spacer()
                     Text(m).font(.caption).foregroundColor(.appSecondary).lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                Button(tr("详情…", "Details…")) {
+                    appState.openSMARTDetails()
+                }
+                .font(.caption)
+                .controlSize(.small)
+                .help(tr("查看完整 SMART 属性表、错误日志与自检日志。",
+                          "View the full SMART attribute table, error log and self-test log."))
             }
 
             let risks = riskMetrics

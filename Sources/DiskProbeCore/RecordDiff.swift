@@ -25,19 +25,22 @@ extension ScanRecordExporter {
 /// 语义：
 ///   新增   —— 上次正常，这次出问题（盘正在恶化的铁证）
 ///   加重   —— 两次都有问题，这次更严重
+///   好转   —— 两次都有问题，这次更轻（仍在异常，但严重度下降）
 ///   持续   —— 两次问题严重度相同
 ///   恢复   —— 上次有问题，这次正常（多为系统抖动造成的假阳性消退）
 public struct RecordDiff: Sendable {
     public enum Kind: Int, Sendable {
         case new = 0
         case worsened = 1
-        case persistent = 2
-        case resolved = 3
+        case improved = 2
+        case persistent = 3
+        case resolved = 4
 
         public var key: String {
             switch self {
             case .new: return "new"
             case .worsened: return "worsened"
+            case .improved: return "improved"
             case .persistent: return "persistent"
             case .resolved: return "resolved"
             }
@@ -57,6 +60,7 @@ public struct RecordDiff: Sendable {
     public var items: [Item]
     public var newCount: Int { count(.new) }
     public var worsenedCount: Int { count(.worsened) }
+    public var improvedCount: Int { count(.improved) }
     public var persistentCount: Int { count(.persistent) }
     public var resolvedCount: Int { count(.resolved) }
 
@@ -75,7 +79,8 @@ public struct RecordDiff: Sendable {
             let oldRec = oldByOffset[offset]
             let kind: Kind
             if let o = oldRec {
-                kind = newRec.status.severityOrder > o.status.severityOrder ? .worsened : .persistent
+                let delta = newRec.status.severityOrder - o.status.severityOrder
+                kind = delta > 0 ? .worsened : (delta < 0 ? .improved : .persistent)
             } else {
                 kind = .new
             }
@@ -94,7 +99,7 @@ public struct RecordDiff: Sendable {
                               newBlockIndex: nil,
                               kind: .resolved))
         }
-        // 新增 > 加重 > 持续 > 恢复，同级按偏移排序
+        // 新增 > 加重 > 好转 > 持续 > 恢复，同级按偏移排序
         items.sort { a, b in
             if a.kind != b.kind { return a.kind.rawValue < b.kind.rawValue }
             return a.offsetBytes < b.offsetBytes

@@ -71,6 +71,7 @@ struct RecordDiffSheet: View {
         HStack(spacing: 18) {
             countBadge(tr("新增", "New"), d.newCount, color: .red)
             countBadge(tr("加重", "Worse"), d.worsenedCount, color: .orange)
+            countBadge(tr("好转", "Better"), d.improvedCount, color: .blue)
             countBadge(tr("持续", "Same"), d.persistentCount, color: .gray)
             countBadge(tr("恢复", "Healed"), d.resolvedCount, color: .green)
         }
@@ -129,6 +130,7 @@ struct RecordDiffSheet: View {
         switch kind {
         case .new: return tr("新增", "NEW")
         case .worsened: return tr("加重", "WORSE")
+        case .improved: return tr("好转", "BETTER")
         case .persistent: return tr("持续", "SAME")
         case .resolved: return tr("恢复", "HEALED")
         }
@@ -138,6 +140,7 @@ struct RecordDiffSheet: View {
         switch kind {
         case .new: return .red
         case .worsened: return .orange
+        case .improved: return .blue
         case .persistent: return .gray
         case .resolved: return .green
         }
