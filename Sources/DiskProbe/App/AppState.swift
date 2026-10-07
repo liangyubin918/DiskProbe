@@ -45,7 +45,20 @@ final class AppState: ObservableObject {
     @Published var disks: [DiskInfo] = []
     // 注意：切盘不清数据——扫描结果绑定在 resultsDiskID 上，后台扫描继续进行；
     // 面板按 scanResultsBelong(to:) 决定显示实时结果还是空状态
-    @Published var selectedDisk: DiskInfo? = nil
+    @Published var selectedDisk: DiskInfo? = nil {
+        didSet {
+            // 切换磁盘（bsdName 变化）时立刻清掉上一个盘的 SMART 展示：
+            // 旧数据挂在屏上比"读取中"更误导。重读由数据层驱动，不依赖
+            // 视图侧 .id + onAppear（在 HSplitView 里该机制时灵时不灵）。
+            // 同一磁盘的重复赋值（refreshDisks 更新 displayName）不触发。
+            // didSet 里拿不到 newValue（那是 willSet 的），新值直接读属性本身
+            guard oldValue?.id != selectedDisk?.id else { return }
+            smartInfo = nil
+            smartError = nil
+            smartDetails = nil
+            Task { await refreshSMART() }
+        }
+    }
     @Published var isEnumerating = false
     @Published var enumerateError: String? = nil
 
