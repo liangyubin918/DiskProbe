@@ -248,8 +248,8 @@ actor SMARTReader {
     static let spawnFailureExitStatus: Int32 = -1
 
     /// 返回 stdout 与退出码。退出码交给调用方解释（smartctl 的退出码是位掩码），
-    /// 超时/spawn 失败返回上面的哨兵值。
-    private static func runProcess(_ path: String, args: [String]) -> (String, Int32) {
+    /// 超时/spawn 失败返回上面的哨兵值。internal：USBInfo 复用同一套超时逻辑。
+    static func runProcess(_ path: String, args: [String]) -> (String, Int32) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args

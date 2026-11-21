@@ -588,3 +588,166 @@ import Testing
         #expect(SMARTDetailsSheet.formatLeadingNumber("abc123") == "abc123")
     }
 }
+
+// MARK: SMART 历史快照与趋势
+
+@Suite struct SMARTTrendTests {
+    private func makeDetails(ata: [Int: String],
+                             nvme: SMARTNVMeHealth? = nil) -> SMARTDetails {
+        var d = SMARTDetails(bsdName: "disk8",
+                             deviceType: nvme == nil ? "ata" : "nvme",
+                             model: "ST9500325AS", serial: "TESTSER01")
+        d.attributes = ata.map { id, raw in
+            SMARTAttributeRow(id: id, name: "Attr\(id)", value: 100, worst: 100,
+                              threshold: 0, rawString: raw, isPrefail: false, whenFailed: "")
+        }.sorted { $0.id < $1.id }
+        d.nvmeHealth = nvme
+        return d
+    }
+
+    private func snap(_ ata: [Int: Int64], date: Date) -> SMARTSnapshot {
+        SMARTSnapshot(date: date, model: "ST9500325AS", serial: "TESTSER01",
+                      interface: "ata", powerOnHours: ata[9], ataRaw: ata,
+                      nvmeMediaErrors: nil, nvmeNumErrLogEntries: nil,
+                      nvmePercentageUsed: nil)
+    }
+
+    @Test func snapshotCapturesTrackedRawValues() {
+        let d = makeDetails(ata: [5: "45", 9: "8866", 197: "3", 199: "0"])
+        let s = SMARTTrendEngine.snapshot(from: d, date: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(s.serial == "TESTSER01")
+        #expect(s.ataRaw?[5] == 45)
+        #expect(s.ataRaw?[9] == 8866)
+        #expect(s.ataRaw?[197] == 3)
+        #expect(s.powerOnHours == 8866)
+        // 带后缀注释的原始值只取前导整数（与展示一致）
+        let d2 = makeDetails(ata: [194: "24 (0 1 0 0 0)"])
+        #expect(SMARTTrendEngine.snapshot(from: d2, date: Date()).ataRaw?[194] == 24)
+    }
+
+    @Test func trendsCompareLastSnapshotWithCurrent() {
+        let d1 = snap([5: 40, 9: 8800], date: Date(timeIntervalSince1970: 1_790_000_000))
+        let d2 = snap([5: 40, 9: 8860], date: Date(timeIntervalSince1970: 1_800_000_000))
+        let current = makeDetails(ata: [5: "45", 9: "8866"])
+        let trends = SMARTTrendEngine.trends(history: [d1, d2], current: current)
+
+        let realloc = trends.first { $0.key == "ata:5" }
+        #expect(realloc?.previous == 40)
+        #expect(realloc?.current == 45)
+        #expect(realloc?.delta == 5)
+        #expect(realloc?.lastRecordDate == d2.date)
+        #expect(realloc?.series == [40, 40, 45])
+
+        let hours = trends.first { $0.key == "ata:9" }
+        #expect(hours?.delta == 6)
+        #expect(hours?.series == [8800, 8860, 8866])
+    }
+
+    @Test func trendsEmptyWhenNoHistory() {
+        let current = makeDetails(ata: [5: "45"])
+        #expect(SMARTTrendEngine.trends(history: [], current: current).isEmpty)
+    }
+
+    @Test func nvmeTrendsUseHealthFields() {
+        let history = [SMARTSnapshot(date: Date(timeIntervalSince1970: 1_790_000_000),
+                                     model: "APPLE SSD", serial: "TESTSER01",
+                                     interface: "nvme", powerOnHours: 100, ataRaw: nil,
+                                     nvmeMediaErrors: 2, nvmeNumErrLogEntries: 10,
+                                     nvmePercentageUsed: 3)]
+        let current = makeDetails(ata: [:],
+                                  nvme: SMARTNVMeHealth(percentageUsed: 4,
+                                                        mediaErrors: 5,
+                                                        numErrLogEntries: 12))
+        let trends = SMARTTrendEngine.trends(history: history, current: current)
+        let media = trends.first { $0.key == "nvme:media_errors" }
+        #expect(media?.delta == 3)
+        #expect(media?.series == [2, 5])
+        let used = trends.first { $0.key == "nvme:percentage_used" }
+        #expect(used?.delta == 1)
+    }
+}
+
+@Suite struct SMARTHistoryStoreTests {
+    private func tempDir() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DiskProbeTests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func snap(_ ata5: Int64, at: Double) -> SMARTSnapshot {
+        SMARTSnapshot(date: Date(timeIntervalSince1970: at), model: "M", serial: "TESTSER01",
+                      interface: "ata", powerOnHours: ata5 * 10, ataRaw: [5: ata5],
+                      nvmeMediaErrors: nil, nvmeNumErrLogEntries: nil, nvmePercentageUsed: nil)
+    }
+
+    @Test func roundTripDedupeAndCap() {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // 存储契约：同一个序列号字符串（无论含什么字符）经同样的净化，
+        // append 与 load 必然命中同一个文件
+        let serial = "TEST/SER*01"
+        #expect(SMARTHistoryStore.fileName(serial: serial) == "TEST_SER_01")
+
+        let first = snap(40, at: 1_790_000_000)
+        #expect(SMARTHistoryStore.append(snapshot: first, serial: serial, directory: dir))
+        #expect(SMARTHistoryStore.load(serial: serial, directory: dir).count == 1)
+
+        // 完全相同的快照跳过：不产生重复点
+        #expect(SMARTHistoryStore.append(snapshot: first, serial: serial, directory: dir) == false)
+        #expect(SMARTHistoryStore.load(serial: serial, directory: dir).count == 1)
+
+        #expect(SMARTHistoryStore.append(snapshot: snap(41, at: 1_795_000_000), serial: serial, directory: dir))
+        let two = SMARTHistoryStore.load(serial: serial, directory: dir)
+        #expect(two.count == 2)
+        #expect(two.map(\.ataRaw?[5]) == [40, 41])   // 按时间升序
+
+        // 序列号里的非法字符被替换成下划线后，与净化后的 key 命中同一个文件
+        #expect(SMARTHistoryStore.fileName(serial: "TEST/SER*01") == "TEST_SER_01")
+    }
+
+    @Test func capsAtMaxSnapshotsDroppingOldest() {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for i in 0..<205 {
+            SMARTHistoryStore.append(snapshot: snap(Int64(i), at: Double(i)),
+                                     serial: "CAPTEST", directory: dir)
+        }
+        let loaded = SMARTHistoryStore.load(serial: "CAPTEST", directory: dir)
+        #expect(loaded.count == SMARTHistoryStore.maxSnapshots)
+        #expect(loaded.first?.ataRaw?[5] == 5)      // 最旧的被丢弃
+        #expect(loaded.last?.ataRaw?[5] == 204)
+    }
+}
+
+// MARK: USB 桥接识别（system_profiler JSON 解析）
+
+@Suite struct USBInfoParseTests {
+    private let fixture = """
+    {"SPUSBDataType":[
+      {"_name":"USB31Bus","items":[
+        {"_name":"USB20Bus","items":[
+          {"_name":"External","vendor_id":"0x0204","product_id":"0x6025","manufacturer":"EAGET",
+           "media":[{"bsd_name":"disk8","volumes":[{"volume_uuid":"X"}]}]}
+        ]}
+      ]},
+      {"_name":"USB31Bus-1","items":[]}
+    ]}
+    """
+
+    @Test func findsDeviceByBSDNameAcrossTreeLevels() throws {
+        let info = try #require(USBInfo.parse(data: Data(fixture.utf8), bsdName: "disk8"))
+        #expect(info.vendorID == "0x0204")
+        #expect(info.productID == "0x6025")
+        #expect(info.manufacturer == "EAGET")
+        #expect(info.productName == "External")
+        #expect(USBBridgeInfo.vendorName(for: "0x0204") == "Chipsbank 芯邦")
+        #expect(USBBridgeInfo.vendorName(for: "0x152d") == "JMicron 智微")   // 大小写不敏感
+    }
+
+    @Test func returnsNilForOtherDiskOrGarbage() {
+        #expect(USBInfo.parse(data: Data(fixture.utf8), bsdName: "disk9") == nil)
+        #expect(USBInfo.parse(data: Data("not json".utf8), bsdName: "disk8") == nil)
+    }
+}

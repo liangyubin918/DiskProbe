@@ -13,6 +13,8 @@ struct SMARTDetailsSheet: View {
     @Environment(\.presentationMode) private var presentationMode
 
     @State private var copyFeedback = false
+    /// 0 = 常态，1 = 已记录，2 = 与上次相同（无变化）
+    @State private var recordState = 0
 
     private var details: SMARTDetails? { appState.smartDetails }
 
@@ -36,6 +38,23 @@ struct SMARTDetailsSheet: View {
                     .font(.callout).foregroundColor(.appSecondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
+
+            Button {
+                Task {
+                    let recorded = await appState.recordHistorySnapshotFromCurrent()
+                    recordState = recorded ? 1 : 2
+                    try? await Task.sleep(nanoseconds: 1_800_000_000)
+                    recordState = 0
+                }
+            } label: {
+                Label(recordState == 1 ? tr("已记录", "Recorded")
+                        : (recordState == 2 ? tr("无变化", "Unchanged") : tr("记录快照", "Snapshot")),
+                      systemImage: recordState == 1 ? "checkmark" : "clock.arrow.circlepath")
+            }
+            .controlSize(.small)
+            .disabled(details == nil)
+            .help(tr("把当前读数存入本盘的历史快照（扫描完成也会自动记录），趋势据此计算。",
+                     "Store the current reading as a history snapshot for this disk (also recorded automatically after scans); trends are computed from these."))
 
             HStack {
                 Spacer()
@@ -119,6 +138,7 @@ struct SMARTDetailsSheet: View {
                             "This device does not expose SMART details (some USB bridge chips do not support passthrough)."))
                         .font(.callout).foregroundColor(.appSecondary)
                 }
+                trendSection(d)
                 if !d.errorLog.isEmpty {
                     ataErrorLogSection(d)
                 }
@@ -148,6 +168,16 @@ struct SMARTDetailsSheet: View {
         if let ff = d.formFactorName {
             items.append((tr("形态", "Form Factor"), ff))
         }
+        if let usb = appState.usbBridge {
+            var usbText = "VID \(usb.vendorID) · PID \(usb.productID)"
+            if let vendor = USBBridgeInfo.vendorName(for: usb.vendorID) {
+                usbText += " · \(vendor)"
+            }
+            if let manufacturer = usb.manufacturer, !manufacturer.isEmpty {
+                usbText += " · \(manufacturer)"
+            }
+            items.append((tr("USB 桥接", "USB Bridge"), usbText))
+        }
         return LazyVGrid(columns: [GridItem(.flexible(), spacing: 16),
                                    GridItem(.flexible(), spacing: 16),
                                    GridItem(.flexible())],
@@ -162,6 +192,100 @@ struct SMARTDetailsSheet: View {
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.appSecondary.opacity(0.06)))
+    }
+
+    // MARK: 历史趋势
+
+    /// 趋势区：上次记录 → 当前读数。只报数字变化（增/减/持平），
+    /// 与属性表同一原则：零主观、零结论。
+    private func trendSection(_ d: SMARTDetails) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(tr("趋势（上次记录 → 当前）", "Trends (last snapshot → now)"))
+                    .font(.caption.weight(.bold)).foregroundColor(.appSecondary)
+                if let info = appState.smartHistory {
+                    Text(tr("\(info.count) 条快照", "\(info.count) snapshots"))
+                        .font(.caption2).foregroundColor(.appTertiary)
+                }
+            }
+            if let trends = appState.smartTrends, !trends.isEmpty {
+                ForEach(trends) { t in
+                    trendRow(t)
+                }
+            } else if (appState.smartHistory?.count ?? 0) == 1 {
+                Text(tr("已有 1 条快照：完成一次扫描或点上方「记录快照」后即可对比。",
+                        "1 snapshot recorded: run a scan or tap Snapshot above to enable comparison."))
+                    .font(.caption).foregroundColor(.appSecondary)
+            } else {
+                Text(tr("尚无历史快照：完成一次扫描或点上方「记录快照」开始积累。",
+                        "No snapshots yet: run a scan or tap Snapshot above to start recording."))
+                    .font(.caption).foregroundColor(.appSecondary)
+            }
+            if let earliest = appState.smartHistory?.earliest {
+                Text(tr("最早记录：\(Self.shortDate(earliest))", "Earliest record: \(Self.shortDate(earliest))"))
+                    .font(.caption2).foregroundColor(.appTertiary)
+            }
+        }
+    }
+
+    private func trendRow(_ t: SMARTAttributeTrend) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Text(trendName(t.key))
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let prev = t.previous, let delta = t.delta {
+                    HStack(spacing: 5) {
+                        Text("\(Self.thousands(prev)) → \(Self.thousands(t.current))")
+                            .font(.caption.monospacedDigit())
+                        deltaText(delta)
+                    }
+                } else {
+                    Text(tr("首次记录 \(Self.thousands(t.current))", "First record: \(Self.thousands(t.current))"))
+                        .font(.caption.monospacedDigit()).foregroundColor(.appSecondary)
+                }
+            }
+            if t.series.count > 2 {
+                Text(tr("近 \(t.series.count) 次记录：\(seriesText(t.series))",
+                        "Last \(t.series.count) records: \(seriesText(t.series))"))
+                    .font(.caption2.monospacedDigit()).foregroundColor(.appTertiary)
+                    .lineLimit(1).truncationMode(.head)
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.appSecondary.opacity(0.05)))
+        .help(tr("升/降只是计数变化的客观呈现，不代表任何结论。",
+                 "Up/down is an objective presentation of counter changes, not a conclusion."))
+    }
+
+    private func deltaText(_ delta: Int64) -> Text {
+        let text = delta > 0 ? "+\(delta)" : (delta < 0 ? "\(delta)" : "±0")
+        return Text(text)
+            .font(.caption2.monospacedDigit().weight(.bold))
+            .foregroundColor(delta > 0 ? .orange : (delta < 0 ? .blue : .appSecondary))
+    }
+
+    private func seriesText(_ series: [Int64]) -> String {
+        series.map { Self.thousands($0) }.joined(separator: " → ")
+    }
+
+    private func trendName(_ key: String) -> String {
+        if key.hasPrefix("ata:"), let id = Int(key.dropFirst(4)),
+           let known = Self.attributeDescriptions[id] {
+            return known.zh
+        }
+        switch key {
+        case "nvme:media_errors": return tr("介质错误", "Media Errors")
+        case "nvme:num_err_log_entries": return tr("错误日志条目", "Error Log Entries")
+        case "nvme:percentage_used": return tr("寿命已用", "Used Life")
+        default: return key
+        }
+    }
+
+    private static func shortDate(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
     }
 
     // MARK: ATA 属性表

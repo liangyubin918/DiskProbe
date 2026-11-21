@@ -56,6 +56,9 @@ final class AppState: ObservableObject {
             smartInfo = nil
             smartError = nil
             smartDetails = nil
+            smartTrends = nil
+            smartHistory = nil
+            usbBridge = nil
             Task { await refreshSMART() }
         }
     }
@@ -476,6 +479,10 @@ final class AppState: ObservableObject {
     @Published var showSMARTDetails = false
     @Published var isLoadingSMARTDetails = false
     @Published var smartDetailsError: String? = nil
+    // 历史趋势与 USB 桥接（详情面板展示）
+    @Published var smartTrends: [SMARTAttributeTrend]? = nil
+    @Published var smartHistory: SMARTHistoryInfo? = nil
+    @Published var usbBridge: USBBridgeInfo? = nil
     /// 与 smartRequestID 分开：详情 sheet 的请求生命周期独立于摘要条
     private var smartDetailsRequestID = 0
 
@@ -509,10 +516,62 @@ final class AppState: ObservableObject {
         case .success(let details):
             smartDetails = details
             smartDetailsError = nil
+            // USB 桥接识别：system_profiler 首次运行 1–3 秒，放后台，行就绪后再出现
+            let usb = await Task.detached(priority: .utility) {
+                USBInfo.bridgeInfo(bsdName: disk.bsdName)
+            }.value
+            guard requestID == smartDetailsRequestID, disk.id == selectedDisk?.id else { return }
+            usbBridge = usb
+            await refreshSMARTTrends(for: details)
         case .failure(let err):
             // 保留上一次成功的数据，瞬时失败不至于闪空
             smartDetailsError = err.localizedDescription
         }
+    }
+
+    // MARK: SMART 历史快照与趋势
+
+    /// 从当前已加载的详情读数记一条快照（不重跑 smartctl）。
+    /// 返回 false = 无序列号或与最新记录完全相同（跳过）。
+    @discardableResult
+    func recordHistorySnapshotFromCurrent() async -> Bool {
+        guard let details = smartDetails,
+              let serial = details.serial, !serial.isEmpty else { return false }
+        let snapshot = SMARTTrendEngine.snapshot(from: details, date: Date())
+        let recorded = await Task.detached(priority: .utility) {
+            SMARTHistoryStore.append(snapshot: snapshot, serial: serial)
+        }.value
+        // 重算趋势（只读本地 JSON，不重跑 smartctl）
+        await refreshSMARTTrends(for: details)
+        return recorded
+    }
+
+    /// 读本地历史并计算趋势（详情面板的趋势区数据源）
+    private func refreshSMARTTrends(for details: SMARTDetails) async {
+        guard let serial = details.serial, !serial.isEmpty else {
+            smartTrends = nil
+            smartHistory = nil
+            return
+        }
+        let snapshots = await Task.detached(priority: .utility) {
+            SMARTHistoryStore.load(serial: serial)
+        }.value
+        smartHistory = SMARTHistoryInfo(count: snapshots.count, earliest: snapshots.first?.date)
+        smartTrends = snapshots.isEmpty ? nil : SMARTTrendEngine.trends(history: snapshots, current: details)
+    }
+
+    /// 扫描完成后对被扫描的盘静默记一条快照（失败不打扰用户）。
+    /// 用 resultsDiskID 而非 selectedDisk：扫描的盘和当前选中的盘可能不同。
+    func recordHistorySnapshot(for bsdName: String) async {
+        let result = await Task.detached(priority: .utility) {
+            await SMARTReader.readDetails(bsdName: bsdName)
+        }.value
+        guard case .success(let details) = result,
+              let serial = details.serial, !serial.isEmpty else { return }
+        let snapshot = SMARTTrendEngine.snapshot(from: details, date: Date())
+        await Task.detached(priority: .utility) {
+            SMARTHistoryStore.append(snapshot: snapshot, serial: serial)
+        }.value
     }
 
     // MARK: 扫描控制
@@ -756,6 +815,10 @@ final class AppState: ObservableObject {
             authError = await engine.takeLastAuthError() ?? authError
         } else if state == .finished {
             notifyScanFinished()
+            // 扫描完成自动记 SMART 快照（趋势数据来源之一，失败静默）
+            if let scannedDisk = resultsDiskID {
+                Task { await recordHistorySnapshot(for: scannedDisk) }
+            }
         }
     }
 
