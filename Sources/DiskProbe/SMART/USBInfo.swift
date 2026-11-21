@@ -3,14 +3,24 @@ import Foundation
 // MARK: - USB 桥接芯片识别
 //
 // 外置盘的稳定性和桥接芯片强相关（同一块盘换个盒子表现可能天差地别）。
-// 通过 system_profiler 的 USB 树找到挂载指定 BSD 磁盘的设备节点，
-// 取 VID/PID 供详情面板展示；厂商名只做客观映射，不做任何评判。
+// 这里取 VID/PID 供详情面板展示；厂商名只做客观映射，不做任何评判。
+//
+// 数据源踩坑记录（2026-11 实测 macOS 26.4）：
+//   - system_profiler SPUSBDataType 在部分环境下返回空树（退出码 0 但
+//     SPUSBDataType: []），不可依赖；
+//   - USB 设备节点的类名是 IOUSBHostDevice（旧系统为 AppleUSBHostDevice，
+//     两种都要兼容）；
+//   - IOUSB 平面里没有 IOMedia（BSD Name 在全量树里才有）。
+//
+// 因此用全量 ioreg：注册表输出是 DFS 先序，"BSD Name" 行之前最近的
+// USBHostDevice 节点就是该磁盘所在的 USB 设备——即使前面有 Hub 或
+// 兄弟设备，先序保证离得最近的一定是盘自己的设备节点。
 
 struct USBBridgeInfo: Sendable, Equatable {
     var vendorID: String      // 形如 "0x0204"
     var productID: String     // 形如 "0x6025"
-    var productName: String?  // 设备名（_name，如 "External"）
-    var manufacturer: String? // 设备厂商字符串（system_profiler 提供时才有）
+    var productName: String?  // 设备名（kUSBProductString，如 "External"）
+    var manufacturer: String? // 设备厂商字符串（kUSBVendorString，多数桥接没有）
 
     /// 已知 USB 存储主控/桥接厂商的客观映射（VID → 厂商名）
     static let knownVendors: [Int: String] = [
@@ -34,52 +44,72 @@ struct USBBridgeInfo: Sendable, Equatable {
 }
 
 enum USBInfo {
-    /// 找到挂载指定 BSD 磁盘（如 "disk8"）的 USB 设备节点。内置盘/未找到返回 nil。
-    /// system_profiler 首次运行可能 1–3 秒，调用方放后台线程。
+    /// 找到挂载指定 BSD 磁盘（如 "disk8"）的 USB 设备节点。未找到返回 nil。
+    /// 全量 ioreg 输出有数 MB，调用方放后台线程（自带 15 秒超时）。
     static func bridgeInfo(bsdName: String) -> USBBridgeInfo? {
-        let (output, _) = SMARTReader.runProcess("/usr/sbin/system_profiler",
-                                                 args: ["SPUSBDataType", "-json"])
-        guard let data = output.data(using: .utf8) else { return nil }
-        return parse(data: data, bsdName: bsdName)
+        let (output, _) = SMARTReader.runProcess("/usr/sbin/ioreg", args: ["-l", "-w", "0"])
+        return parseText(output, bsdName: bsdName)
     }
 
-    /// 解析 system_profiler SPUSBDataType -json 的输出。
-    /// 树形结构：SPUSBDataType → 总线 → Hub → 设备；设备节点带
-    /// vendor_id/product_id 和 media 数组（其中 bsd_name 对应磁盘）。
-    /// 纯函数，可测。
-    static func parse(data: Data, bsdName: String) -> USBBridgeInfo? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tree = root["SPUSBDataType"] as? [[String: Any]] else { return nil }
-        for node in tree {
-            if let hit = find(in: node, bsdName: bsdName) { return hit }
-        }
-        return nil
-    }
+    /// 从 ioreg -l 文本里定位磁盘的 USB 设备。纯函数，可测。
+    static func parseText(_ output: String, bsdName: String) -> USBBridgeInfo? {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        let marker = "\"BSD Name\" = \"\(bsdName)\""
 
-    private static func find(in node: [String: Any], bsdName: String) -> USBBridgeInfo? {
-        if let mediaList = node["media"] as? [[String: Any]],
-           mediaList.contains(where: { ($0["bsd_name"] as? String) == bsdName }) {
-            return makeInfo(from: node)
+        // 1) 定位磁盘的 BSD Name 行（磁盘枚举节点）
+        var matchLine: Int? = nil
+        for (i, line) in lines.enumerated() where line.contains(marker) {
+            matchLine = i
+            break
         }
-        // 子节点键在不同系统上有 "items"/"_items" 两种形态
-        for childKey in ["items", "_items"] {
-            if let children = node[childKey] as? [[String: Any]] {
-                for child in children {
-                    if let hit = find(in: child, bsdName: bsdName) { return hit }
-                }
+        guard let matchLine else { return nil }
+
+        // 2) 向前找最近的 USBHostDevice 节点（兼容 AppleUSBHostDevice /
+        //    IOUSBHostDevice 两种类名；先序保证最近的是盘自己的设备节点）
+        var deviceLine: Int? = nil
+        for i in stride(from: matchLine, through: 0, by: -1) {
+            if lines[i].contains("+-o"), lines[i].contains("USBHostDevice") {
+                deviceLine = i
+                break
             }
         }
-        return nil
+        guard let deviceLine else { return nil }
+
+        // 3) 从设备节点向后收集属性，遇到下一个节点行即止（子节点会重复
+        //    携带 idVendor，不能吃到）
+        var vid: Int? = nil
+        var pid: Int? = nil
+        var name: String? = nil
+        let upper = min(lines.count, deviceLine + 400)
+        for i in (deviceLine + 1)..<upper {
+            let line = String(lines[i])
+            // 遇到下一个节点行即止——设备自身属性先于任何子节点出现
+            if line.contains("+-o") { break }
+            if vid == nil { vid = intValue("idVendor", in: line) }
+            if pid == nil { pid = intValue("idProduct", in: line) }
+            if name == nil { name = quotedValue("kUSBProductString", in: line) }
+        }
+        guard let vid, let pid else { return nil }
+        return USBBridgeInfo(vendorID: hex4(vid), productID: hex4(pid),
+                             productName: name, manufacturer: nil)
     }
 
-    private static func makeInfo(from node: [String: Any]) -> USBBridgeInfo? {
-        guard let vid = node["vendor_id"] as? String,
-              let pid = node["product_id"] as? String else { return nil }
-        return USBBridgeInfo(
-            vendorID: vid,
-            productID: pid,
-            productName: node["_name"] as? String,
-            manufacturer: node["manufacturer"] as? String
-        )
+    private static func intValue(_ key: String, in line: String) -> Int? {
+        guard let range = line.range(of: "\"\(key)\" = ") else { return nil }
+        let rest = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+        let digits = rest.prefix { $0.isNumber }
+        guard !digits.isEmpty else { return nil }
+        return Int(digits)
+    }
+
+    private static func quotedValue(_ key: String, in line: String) -> String? {
+        guard let range = line.range(of: "\"\(key)\" = \"") else { return nil }
+        let rest = line[range.upperBound...]
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        return String(rest[..<end])
+    }
+
+    private static func hex4(_ v: Int) -> String {
+        String(format: "0x%04X", v)
     }
 }

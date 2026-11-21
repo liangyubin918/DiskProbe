@@ -516,10 +516,13 @@ final class AppState: ObservableObject {
         case .success(let details):
             smartDetails = details
             smartDetailsError = nil
-            // USB 桥接识别：system_profiler 首次运行 1–3 秒，放后台，行就绪后再出现
-            let usb = await Task.detached(priority: .utility) {
-                USBInfo.bridgeInfo(bsdName: disk.bsdName)
-            }.value
+            // USB 桥接识别：仅对 USB 协议的盘查询（system_profiler 在部分
+            // 系统上返回空树，实际用全量 ioreg 回溯匹配，输出有数 MB 放后台）
+            let usb: USBBridgeInfo? = disk.deviceProtocol == "USB"
+                ? await Task.detached(priority: .utility) {
+                    USBInfo.bridgeInfo(bsdName: disk.bsdName)
+                }.value
+                : nil
             guard requestID == smartDetailsRequestID, disk.id == selectedDisk?.id else { return }
             usbBridge = usb
             await refreshSMARTTrends(for: details)

@@ -721,33 +721,59 @@ import Testing
     }
 }
 
-// MARK: USB 桥接识别（system_profiler JSON 解析）
+// MARK: USB 桥接识别（ioreg 全量树解析）
 
 @Suite struct USBInfoParseTests {
+    /// 从本机真实 ioreg 输出（macOS 26.4）截取的关键行，verbatim 保留缩进。
+    /// 结构：USB 设备节点（IOUSBHostDevice）→ 属性 → 子节点（UAS 驱动，
+    /// 会重复携带 idVendor）→ 更深处的 IOMedia 带 BSD Name。
     private let fixture = """
-    {"SPUSBDataType":[
-      {"_name":"USB31Bus","items":[
-        {"_name":"USB20Bus","items":[
-          {"_name":"External","vendor_id":"0x0204","product_id":"0x6025","manufacturer":"EAGET",
-           "media":[{"bsd_name":"disk8","volumes":[{"volume_uuid":"X"}]}]}
-        ]}
-      ]},
-      {"_name":"USB31Bus-1","items":[]}
-    ]}
+    | |   | |   +-o External@00200000  <class IOUSBHostDevice, id 0x100006178, registered, matched, active, busy 0 (607 ms), retain 119>
+    | |   | |     |   "idVendor" = 516
+    | |   | |     |   "idProduct" = 24613
+    | |   | |     |   "kUSBProductString" = "External"
+    | |   | |           +-o IOUSBMassStorageUASDriver  <class IOUSBMassStorageUASDriver, id 0x100006188, registered, matched, active, busy 0 (385 ms), retain 9>
+    | |   | |           |   "idVendor" = 516
+    | |   | |           |   "idProduct" = 24613
+    | |   | |                         |   "BSD Name" = "disk8"
     """
 
-    @Test func findsDeviceByBSDNameAcrossTreeLevels() throws {
-        let info = try #require(USBInfo.parse(data: Data(fixture.utf8), bsdName: "disk8"))
+    @Test func findsBridgeByBSDNameSkippingChildProperties() throws {
+        let info = try #require(USBInfo.parseText(fixture, bsdName: "disk8"))
+        // 必须取设备节点自身的 516/24613，而不是子节点里重复出现的同值
         #expect(info.vendorID == "0x0204")
         #expect(info.productID == "0x6025")
-        #expect(info.manufacturer == "EAGET")
         #expect(info.productName == "External")
         #expect(USBBridgeInfo.vendorName(for: "0x0204") == "Chipsbank 芯邦")
-        #expect(USBBridgeInfo.vendorName(for: "0x152d") == "JMicron 智微")   // 大小写不敏感
+        #expect(USBBridgeInfo.vendorName(for: "0x152d") == "JMicron 智微")  // 大小写不敏感
     }
 
-    @Test func returnsNilForOtherDiskOrGarbage() {
-        #expect(USBInfo.parse(data: Data(fixture.utf8), bsdName: "disk9") == nil)
-        #expect(USBInfo.parse(data: Data("not json".utf8), bsdName: "disk8") == nil)
+    @Test func picksNearestUSBHostDeviceWhenHubPrecedes() {
+        // 先序里 Hub 节点先于盘设备节点出现：回溯必须取最近的（盘自己的）
+        let hubAndDisk = """
+    +-o Hub@00100000  <class IOUSBHostDevice, id 0x100006100, registered, matched, active>
+    |   "idVendor" = 1452
+    |   "idProduct" = 1023
+    | +-o External@00200000  <class IOUSBHostDevice, id 0x100006178, registered, matched, active>
+    | |   "idVendor" = 516
+    | |   "idProduct" = 24613
+    | |   "kUSBProductString" = "External"
+    | |   "BSD Name" = "disk8"
+    """
+        let info = USBInfo.parseText(hubAndDisk, bsdName: "disk8")
+        #expect(info?.vendorID == "0x0204")   // 不是 Hub 的 1452
+        #expect(info?.productID == "0x6025")
+    }
+
+    @Test func returnsNilForMissingDiskOrGarbage() {
+        #expect(USBInfo.parseText(fixture, bsdName: "disk9") == nil)
+        #expect(USBInfo.parseText("", bsdName: "disk8") == nil)
+        #expect(USBInfo.parseText("garbage without registry lines", bsdName: "disk8") == nil)
+    }
+
+    @Test func hexFormattingMatchesVendorIDs() {
+        // 516 → 0x0204、24613 → 0x6025（与系统实际 VID/PID 一致）
+        let info = USBInfo.parseText(fixture, bsdName: "disk8")
+        #expect(info?.vendorID == "0x0204" && info?.productID == "0x6025")
     }
 }
